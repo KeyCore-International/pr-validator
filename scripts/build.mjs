@@ -57,7 +57,29 @@ async function bundle(entry) {
     },
   });
 
-  return result.outputFiles[0].text;
+  // Normalise to LF. Some dependencies ship CRLF sources and esbuild preserves
+  // them, so the raw output differs from machine to machine. Git then stores
+  // the committed bundle as LF, and `--verify` would report a stale bundle on
+  // a machine where nothing is wrong. Emitting LF makes the artifact canonical.
+  return result.outputFiles[0].text.replace(/\r\n/g, '\n');
+}
+
+/** Where two strings first diverge, with a little context around it. */
+function firstDifference(a, b) {
+  const limit = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < limit && a[i] === b[i]) i += 1;
+
+  if (i === limit && a.length === b.length) return null;
+
+  const from = Math.max(0, i - 60);
+  const to = i + 60;
+  return {
+    offset: i,
+    line: a.slice(0, i).split('\n').length,
+    committed: JSON.stringify(a.slice(from, to)),
+    rebuilt: JSON.stringify(b.slice(from, to)),
+  };
 }
 
 let failed = false;
@@ -78,6 +100,14 @@ for (const target of TARGETS) {
 
     if (committed !== code) {
       console.error(`STALE    ${target.out} — does not match src/, run \`npm run build\``);
+      const diff = firstDifference(committed, code);
+      if (diff) {
+        console.error(`         first difference at offset ${diff.offset} (line ~${diff.line})`);
+        console.error(`         committed: ${diff.committed}`);
+        console.error(`         rebuilt:   ${diff.rebuilt}`);
+      } else {
+        console.error('         same content, different length — check trailing bytes');
+      }
       failed = true;
     } else {
       console.log(`OK       ${target.out}`);
