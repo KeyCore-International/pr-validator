@@ -89,6 +89,22 @@ jobs:
       fail-fast: false
       matrix:
         check: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    # One output per check, and one line each, because output names cannot be
+    # computed. Every matrix instance writes only its own key and leaves the
+    # rest empty; GitHub merges the instances and an empty value never
+    # overwrites a filled one, so `report` sees all three.
+    #
+    # The verdicts used to travel as artifacts, which is the obvious design and
+    # the wrong one: uploading needs Actions storage, and an organization that
+    # ran out of it saw every check go red with no comment explaining why. A
+    # storage quota is not a code problem and must not gate a merge. Job
+    # outputs cost nothing and cannot run out.
+    #
+    # Adding a check therefore means adding one line here. See AGENTS.md.
+    outputs:
+      criteria: ${{ steps.emit.outputs.criteria }}
+      security: ${{ steps.emit.outputs.security }}
+      rules: ${{ steps.emit.outputs.rules }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -112,17 +128,27 @@ jobs:
           TASKS_API_PASSWORD: ${{ secrets.TASKS_API_PASSWORD }}
           PR_VALIDATOR_MODEL: ${{ vars.PR_VALIDATOR_MODEL }}
 
-      # Upload BEFORE gating. The gate below can fail the job, and a failed job
+      # Emit BEFORE gating. The gate below can fail the job, and a failed job
       # would never reach this step — the consolidated comment would lose this
       # check and show it as "sin resultado".
-      - name: Upload verdict
+      - name: Emit verdict
+        id: emit
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: verdict-${{ matrix.check }}
-          path: verdict.json
-          if-no-files-found: warn
-          retention-days: 7
+        shell: bash
+        env:
+          CHECK: ${{ matrix.check }}
+        run: |
+          if [ ! -f verdict.json ]; then
+            echo "::warning::$CHECK no produjo verdict.json."
+            exit 0
+          fi
+          # Heredoc delimiter, because the verdict is JSON spanning many lines.
+          # The marker is long enough that it cannot collide with the content.
+          {
+            echo "$CHECK<<PR_VALIDATOR_VERDICT_EOF"
+            cat verdict.json
+            echo "PR_VALIDATOR_VERDICT_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Gate
         if: always()
@@ -159,11 +185,25 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
-      - name: Download verdicts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: verdict-*
-          path: verdicts
+      # The report action still reads a directory of verdicts; only the
+      # transport changed. Rebuilding the files here keeps `report.mjs` and its
+      # tests untouched, and keeps the on-disk shape available for debugging.
+      - name: Materialise verdicts
+        shell: bash
+        env:
+          CRITERIA: ${{ needs.checks.outputs.criteria }}
+          SECURITY: ${{ needs.checks.outputs.security }}
+          RULES: ${{ needs.checks.outputs.rules }}
+        run: |
+          mkdir -p verdicts
+          for check in criteria security rules; do
+            var=$(echo "$check" | tr '[:lower:]' '[:upper:]')
+            body=${!var}
+            [ -n "$body" ] || continue
+            mkdir -p "verdicts/verdict-$check"
+            printf '%s' "$body" > "verdicts/verdict-$check/verdict.json"
+            echo "verdict de $check recuperado."
+          done
 
       - name: Publish consolidated comment
         uses: KeyCore-International/pr-validator/actions/report@v2

@@ -90,11 +90,26 @@ checks  -> matriz, un job por check -> verdict.json como artifact
 report  -> needs: [checks], if: always() -> un solo comentario
 ```
 
-### Por qué el gate va después de subir el artifact
+### Por qué los veredictos viajan como job outputs y no como artifacts
 
-En el job `checks`, `upload-artifact` va **antes** del paso que pone el job en
-rojo. Si la action saliera con código distinto de 0, el job moriría antes de
-subir su veredicto y el comentario consolidado perdería justo el check que falló.
+El artifact es el diseño obvio, y era el equivocado: subirlo consume
+almacenamiento de Actions, y una organización que agotó su cuota vio los tres
+checks en rojo sin comentario que explicara nada. Una cuota llena no es un
+problema del código y no puede bloquear un merge.
+
+Ahora cada instancia de la matriz escribe su veredicto en un job output. Los
+nombres de output no se pueden calcular, así que el job `checks` declara uno por
+check; cada instancia llena solo el suyo y GitHub fusiona las instancias sin que
+un valor vacío pise uno lleno. **Añadir un check implica añadir esa línea.**
+
+El job `report` reconstruye el directorio de veredictos a partir de esos
+outputs, así que `report.mjs` y sus tests no se enteran del cambio.
+
+### Por qué el gate va después de emitir el veredicto
+
+En el job `checks`, el paso que emite el veredicto va **antes** del que pone el
+job en rojo. Si la action saliera con código distinto de 0, el job moriría antes
+de emitirlo y el comentario consolidado perdería justo el check que falló.
 
 Por eso `run-check` **siempre sale 0** y expone `blocking-failure` como output.
 
@@ -115,7 +130,12 @@ Un check es una carpeta autocontenida. El runner no se toca.
 2. Añade el import en `src/checks/registry.mjs` (imports estáticos: dentro del
    bundle no existe `src/checks/` que escanear).
 3. Añade el nombre a `CHECK_ORDER`.
-4. Tests con el gateway simulado, y `npm run build`.
+4. Añade el nombre a `jobs.checks.outputs` y al bucle del paso «Materialise
+   verdicts» en `.github/workflows/pr-validation.yml`. Es el único punto donde
+   un check nuevo toca el workflow, y es inevitable: los nombres de output no se
+   pueden calcular. Sin esa línea el check corre pero su veredicto no llega al
+   comentario.
+5. Tests con el gateway simulado, y `npm run build`.
 
 `render()` devuelve `rows` y `details` por separado, y **no es cosmético**:
 `rows` es la tabla escaneable, `details` es prosa que solo se emite para lo que

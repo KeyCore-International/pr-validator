@@ -12,8 +12,8 @@ import { isValidVerdict } from './report/verdict.mjs';
 
 /**
  * Read every `verdict.json` under a directory tree.
- * `download-artifact` creates one subdirectory per artifact, so the files sit
- * one level down; the walk keeps it robust to layout changes.
+ * The workflow rebuilds one subdirectory per check, so the files sit one level
+ * down; the walk keeps it robust to layout changes.
  */
 export function collectVerdicts(dir, { log = console.error } = {}) {
   const found = [];

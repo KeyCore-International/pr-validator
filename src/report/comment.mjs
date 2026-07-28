@@ -134,7 +134,9 @@ export function renderComment({ verdicts, expected, taskId = null, headRef = '' 
   const missing = order.filter((name) => !byCheck.has(name));
   if (missing.length) {
     out.push(
-      `> Sin resultado de: ${missing.join(', ')}. El job pudo haberse cancelado o agotado su tiempo.`,
+      `> Sin resultado de: ${missing.join(', ')}. El job pudo haberse cancelado, ` +
+        'agotado su tiempo, o no haber podido subir su veredicto — revisa si la ' +
+        'organización agotó su cuota de almacenamiento de Actions.',
       '',
     );
   }

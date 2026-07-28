@@ -8,6 +8,19 @@ y el tag `vX` se mueve al último release de ese major.
 
 ### Corregido
 
+- Los veredictos ya no viajan como artifacts. Subirlos consumía almacenamiento
+  de Actions, y una organización que agotó su cuota vio los tres checks en rojo
+  —`Artifact storage quota has been hit`— sin comentario que explicara nada.
+  Una cuota llena no es un problema del código y no puede bloquear un merge.
+
+  Ahora cada instancia de la matriz emite su veredicto como job output y el job
+  `report` reconstruye el directorio. El gate deja de consumir almacenamiento y
+  deja de depender de él. `report.mjs` no cambia.
+
+  **Para quien añada un check:** hay que declarar su output en
+  `jobs.checks.outputs`. Es el único punto donde un check nuevo toca el
+  workflow; los nombres de output no se pueden calcular.
+
 - Los ejemplos de instalación usaban `secrets: inherit`, que **solo propaga
   cuando quien llama y el workflow llamado están en la misma organización o
   enterprise**. Este validador vive en una organización distinta a la de casi
