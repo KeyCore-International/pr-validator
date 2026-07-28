@@ -4,6 +4,23 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/): los tags `vX.Y.Z` son inmutables
 y el tag `vX` se mueve al último release de ese major.
 
+## [2.0.2] — 2026-07-28
+
+### Corregido
+
+- El paso que emite el veredicto como job output usaba `cat`, y `run-check`
+  escribe `verdict.json` **sin salto de línea final**. La llave de cierre y el
+  delimitador quedaban en la misma línea, el runner rechazaba el archivo de
+  outputs entero —*«Invalid value. Matching delimiter not found»*— y los tres
+  checks salían en rojo con el comentario diciendo «sin resultado».
+
+  Ahora `printf '%s\n' "$(cat verdict.json)"`: la sustitución de comandos quita
+  los saltos finales y `printf` repone exactamente uno, que es lo que exige el
+  formato de heredoc de `GITHUB_OUTPUT`.
+
+- La cabecera del reusable workflow todavía sugería `secrets: inherit`, el
+  consejo que rompía la instalación entre organizaciones. Corregida.
+
 ## [2.0.1] — 2026-07-28
 
 ### Corregido

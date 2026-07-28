@@ -9,7 +9,9 @@ name: PR Validation
 #
 # The caller needs:
 #   permissions: { contents: read, pull-requests: write }
-#   secrets: inherit          (or the secrets listed below, explicitly)
+#   secrets: each one named explicitly — see docs/INSTALL.md. `secrets: inherit`
+#            only propagates within one organization, and most consumers of this
+#            workflow are in another one.
 
 on:
   workflow_call:
@@ -144,9 +146,16 @@ jobs:
           fi
           # Heredoc delimiter, because the verdict is JSON spanning many lines.
           # The marker is long enough that it cannot collide with the content.
+          #
+          # `printf '%s\n' "$(cat ...)"` and not plain `cat`: run-check writes
+          # the file with no trailing newline, so `cat` would leave the closing
+          # brace and the delimiter on the same line and the runner would reject
+          # the whole output file — "Matching delimiter not found". Command
+          # substitution strips trailing newlines and printf puts back exactly
+          # one, which is what the format requires.
           {
             echo "$CHECK<<PR_VALIDATOR_VERDICT_EOF"
-            cat verdict.json
+            printf '%s\n' "$(cat verdict.json)"
             echo "PR_VALIDATOR_VERDICT_EOF"
           } >> "$GITHUB_OUTPUT"
 
