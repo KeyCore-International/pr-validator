@@ -246,6 +246,15 @@ export async function runCheck({ inputs, env = process.env, log = console.error 
     return toolError('AI_GATEWAY_API_KEY no está definido en el repositorio consumidor.');
   }
 
+  // Required, with no fallback: the validator does not pick a model on the
+  // repository's behalf.
+  if (!config.model) {
+    return toolError(
+      'PR_VALIDATOR_MODEL no está definido en el repositorio consumidor. ' +
+        'Configúralo como variable de Actions, o fija `model` en `.pr-validator.json`.',
+    );
+  }
+
   let result;
   try {
     result = await callGateway({

@@ -6,7 +6,7 @@ Guía para agentes de IA que trabajen en este repositorio.
 
 Un gate de validación de pull requests distribuido como **reusable workflow** de
 GitHub Actions. Otros repositorios, de otras organizaciones, lo consumen con
-`uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v1`.
+`uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v2`.
 
 Eso condiciona todo lo demás: **un cambio aquí llega al CI de equipos ajenos en
 cuanto se mueve el tag mayor.** No es una librería que alguien decide actualizar;

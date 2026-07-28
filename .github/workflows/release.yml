@@ -1,7 +1,8 @@
 name: Release
 
 # Moving the major tag is what actually ships to every consuming repository:
-# they pin `@v1`, so this workflow is the deploy button for other teams' CI.
+# they pin the major tag, so this workflow is the deploy button for other teams'
+# CI.
 #
 # Guards before the tag moves:
 #   - the full test suite passes

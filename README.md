@@ -34,7 +34,7 @@ jobs:
       # ...los pasos de build y test propios de tu stack
 
   validate:
-    uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v1
+    uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v2
     with:
       checks: 'criteria,security,rules'
       base: develop
@@ -64,7 +64,7 @@ Se definen en el repositorio consumidor, o mejor a nivel de organización. **Est
 | `TASKS_API_URL` | variable | Solo para `criteria` | URL base del gestor de tareas |
 | `TASKS_API_EMAIL` | secret | Solo para `criteria` | Cuenta de servicio de solo lectura |
 | `TASKS_API_PASSWORD` | secret | Solo para `criteria` | Contraseña de esa cuenta |
-| `PR_VALIDATOR_MODEL` | variable | No | Modelo por defecto |
+| `PR_VALIDATOR_MODEL` | variable | Sí | Modelo que ejecuta los checks |
 
 ## Checks disponibles
 
@@ -91,7 +91,7 @@ Las ramas con prefijo `chore/`, `hotfix/`, `release/`, `dependabot/` o `renovate
 
 ## Versionado
 
-Tags `vX.Y.Z` inmutables y un tag móvil `vX` que siempre apunta al último release de ese major. Fijar `@v1` recibe correcciones y mejoras automáticamente; fijar `@v1.2.3` congela la versión.
+Tags `vX.Y.Z` inmutables y un tag móvil `vX` que siempre apunta al último release de ese major. Fijar `@v2` recibe correcciones y mejoras automáticamente; fijar `@v2.0.0` congela la versión.
 
 Un cambio incompatible siempre implica un major nuevo.
 

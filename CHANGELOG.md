@@ -4,6 +4,21 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/): los tags `vX.Y.Z` son inmutables
 y el tag `vX` se mueve al último release de ese major.
 
+## [2.0.0] — 2026-07-28
+
+### Cambios incompatibles
+
+- **`PR_VALIDATOR_MODEL` pasa a ser obligatorio.** El validador ya no trae un
+  modelo por defecto. Un repositorio que no lo define recibe un error de
+  herramienta —advertencia visible, sin bloquear el merge— en vez de correr con
+  un modelo que nadie eligió, cuyo costo y precisión nadie acordó.
+
+  Para migrar desde `@v1`: define la variable `PR_VALIDATOR_MODEL` en el
+  repositorio o la organización, y luego cambia la referencia a `@v2`. También
+  sirve fijar `model` en `.pr-validator.json`, global o por check.
+
+  `@v1` queda como estaba y sigue eligiendo modelo por su cuenta.
+
 ## [1.0.0] — 2026-07-28
 
 Primera versión distribuible. El gate deja de vivir copiado dentro de cada

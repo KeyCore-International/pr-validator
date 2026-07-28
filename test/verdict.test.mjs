@@ -223,6 +223,18 @@ describe('runCheck short circuits', () => {
     expect(isBlockingFailure(verdict)).toBe(false);
   });
 
+  it('reports a missing model as a tool error, not a failure', async () => {
+    const verdict = await runCheck({
+      inputs: inputs(),
+      env: { AI_GATEWAY_API_KEY: 'k' },
+      log: () => {},
+    });
+
+    expect(verdict.status).toBe(STATUS.TOOL_ERROR);
+    expect(verdict.notes[0]).toContain('PR_VALIDATOR_MODEL');
+    expect(isBlockingFailure(verdict)).toBe(false);
+  });
+
   it('skips the rules check when the repository declares none', async () => {
     const verdict = await runCheck({ inputs: inputs({ check: 'rules' }), env: {}, log: () => {} });
 

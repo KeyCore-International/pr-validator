@@ -93,7 +93,7 @@ jobs:
 
       - name: Run ${{ matrix.check }}
         id: run
-        uses: KeyCore-International/pr-validator/actions/run-check@v1
+        uses: KeyCore-International/pr-validator/actions/run-check@v2
         with:
           check: ${{ matrix.check }}
           base: origin/${{ inputs.base }}
@@ -158,7 +158,7 @@ jobs:
           path: verdicts
 
       - name: Publish consolidated comment
-        uses: KeyCore-International/pr-validator/actions/report@v1
+        uses: KeyCore-International/pr-validator/actions/report@v2
         with:
           verdicts-dir: verdicts
           checks: ${{ inputs.checks }}

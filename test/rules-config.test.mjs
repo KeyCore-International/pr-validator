@@ -62,9 +62,15 @@ describe('resolveConfig', () => {
   it('falls back to the validator defaults', () => {
     const config = resolveConfig({ check: 'security' });
 
-    expect(config.model).toBe(VALIDATOR_DEFAULTS.model);
     expect(config.blocking).toBe(true);
     expect(config.attempts).toBe(3);
+  });
+
+  it('leaves the model empty when nothing configures one', () => {
+    const config = resolveConfig({ check: 'security' });
+
+    expect(config.model).toBe('');
+    expect(VALIDATOR_DEFAULTS.model).toBeUndefined();
   });
 
   it("lets a check's own config override the defaults", () => {
@@ -103,9 +109,13 @@ describe('resolveConfig', () => {
   });
 
   it('ignores empty overrides instead of blanking the value', () => {
-    const config = resolveConfig({ check: 'criteria', inputs: { model: '' } });
+    const config = resolveConfig({
+      check: 'criteria',
+      checkConfig: { model: 'check/model' },
+      inputs: { model: '' },
+    });
 
-    expect(config.model).toBe(VALIDATOR_DEFAULTS.model);
+    expect(config.model).toBe('check/model');
   });
 
   it('carries failOn through from the check config', () => {
