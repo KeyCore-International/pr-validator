@@ -139,6 +139,12 @@ Un check nuevo arranca **no bloqueante** hasta tener datos de precisión.
 
 ## Trampas conocidas
 
+- **`secrets: inherit` no cruza organizaciones.** Solo propaga cuando quien
+  llama y el workflow llamado están en la misma organización o enterprise —y
+  casi ningún consumidor de este validador lo está. Los ejemplos de la
+  documentación pasan cada secret nombrado por una razón: con `inherit` el gate
+  se queja de un secret ausente que sí existe, y el mensaje apunta al lugar
+  equivocado. No "simplifiques" esos ejemplos.
 - **`vars` en el workflow reusable** se resuelve contra el repositorio
   *llamador*, no contra este.
 - **PRs desde forks** no reciben secrets. Se detectan y los checks de IA se

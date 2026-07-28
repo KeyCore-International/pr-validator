@@ -38,8 +38,13 @@ jobs:
     with:
       checks: 'criteria,security,rules'
       base: develop
-    secrets: inherit
+    secrets:
+      AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
+      TASKS_API_EMAIL: ${{ secrets.TASKS_API_EMAIL }}
+      TASKS_API_PASSWORD: ${{ secrets.TASKS_API_PASSWORD }}
 ```
+
+Los secrets van **nombrados uno por uno**, no con `secrets: inherit`: inherit solo propaga cuando el workflow llamado vive en la misma organización, y este vive en otra.
 
 Guía completa en [`docs/INSTALL.md`](docs/INSTALL.md). Detalle de cada check en [`docs/CHECKS.md`](docs/CHECKS.md).
 

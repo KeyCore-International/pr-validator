@@ -8,6 +8,14 @@ y el tag `vX` se mueve al último release de ese major.
 
 ### Corregido
 
+- Los ejemplos de instalación usaban `secrets: inherit`, que **solo propaga
+  cuando quien llama y el workflow llamado están en la misma organización o
+  enterprise**. Este validador vive en una organización distinta a la de casi
+  todos sus consumidores, así que con `inherit` no llegaba ninguna credencial y
+  el gate se quejaba de un secret ausente que sí existía. Los ejemplos ahora
+  pasan cada secret nombrado, y `AGENTS.md` lo registra como trampa conocida
+  para que nadie los "simplifique" de vuelta.
+
 - `AI_GATEWAY_API_KEY` pasa a `required: false` en la firma del reusable
   workflow. Con `required: true`, un repositorio sin el secret no llegaba a
   ejecutar nada: GitHub rechazaba la llamada con *«Secret AI_GATEWAY_API_KEY is
