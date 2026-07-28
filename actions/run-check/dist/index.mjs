@@ -34982,7 +34982,7 @@ __export(render_exports, {
   render: () => render
 });
 
-// raw-text:C:\Users\Admin\MyProjects\keycore\keycore-pr-validator\src\checks\criteria\prompt.md
+// raw-text:src/checks/criteria/prompt.md
 var prompt_default = 'You are a strict, skeptical PR validator. You are given {{INPUT_MODE}}\n\n- "met" only with concrete evidence in the diff (cite path:line). "partial" if incomplete. "not_met" if no evidence. "manual" if only verifiable by running the app/DB (give the check).\n\nNever mark "met" without citable evidence. Ignore description parts that are context or out-of-scope. If the diff is empty, all are "not_met".\n\nFor every criterion you judge, "criterion" must be a SHORT label (under 80 characters) naming what the criterion requires \u2014 not a copy of the task prose. When the verdict is "partial" or "not_met", "reasoning" must state, in Spanish, what the task required and what is missing from the diff, so the developer can fix it without opening the task manager. Keep it under 240 characters.\n';
 
 // src/checks/criteria/config.json
@@ -35118,7 +35118,7 @@ __export(render_exports2, {
   render: () => render2
 });
 
-// raw-text:C:\Users\Admin\MyProjects\keycore\keycore-pr-validator\src\checks\security\prompt.md
+// raw-text:src/checks/security/prompt.md
 var prompt_default2 = 'You are a senior application-security reviewer. Review ONLY the diff for vulnerabilities and insecure practices introduced or touched by it: injection (SQL/command/path/LDAP), broken authentication/authorization, hard-coded secrets or credentials, sensitive data exposure/logging, missing or weak input validation, insecure deserialization, SSRF, XSS, path traversal, insecure crypto/randomness, unsafe file handling, and similar.\n\nReport ONLY real, evidenced issues in the diff \u2014 do not speculate about code you cannot see. For each: a severity (high|medium|low), a precise location (path:line), the issue, and a concrete fix. If you find nothing, return an empty "findings" array.\n\nWrite "issue" as a SHORT label (under 80 characters). Write "recommendation" in Spanish, stating the concrete change the developer must make, under 240 characters.\n';
 
 // src/checks/security/config.json
@@ -35186,7 +35186,7 @@ __export(render_exports3, {
   render: () => render3
 });
 
-// raw-text:C:\Users\Admin\MyProjects\keycore\keycore-pr-validator\src\checks\rules\prompt.md
+// raw-text:src/checks/rules/prompt.md
 var prompt_default3 = `You are a strict reviewer enforcing a project's own coding rules. You are given the PROJECT RULES (conventions the codebase must follow) and the diff.
 
 For each rule that the diff is RELEVANT to, judge whether the diff complies: "ok" (complies), "violated" (breaks the rule \u2014 cite path:line), or "na" (rule does not apply to these changes).

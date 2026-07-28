@@ -27,12 +27,15 @@ const FORBIDDEN = [
   '/home/[a-z]+/',
 ];
 
-/** Paths that legitimately cannot satisfy the rule, or are generated. */
-const EXCLUDED = [
-  ':!scripts/neutrality.mjs',
-  ':!package-lock.json',
-  ':!actions/*/dist/*',
-];
+/**
+ * Only this file is excluded — it necessarily contains every term it hunts for.
+ *
+ * The bundles under actions/*&#47;dist are deliberately NOT excluded. They are
+ * published content like any other file, and an earlier version of the build
+ * embedded the author's absolute path into them; excluding generated output is
+ * exactly how that reached a public repository unnoticed.
+ */
+const EXCLUDED = [':!scripts/neutrality.mjs'];
 
 const pattern = FORBIDDEN.join('|');
 

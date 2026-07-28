@@ -9,7 +9,7 @@
 
 import { build } from 'esbuild';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -30,13 +30,19 @@ const TARGETS = [
 const rawTextPlugin = {
   name: 'raw-text',
   setup(pluginBuild) {
+    // The resolved path is REPO-RELATIVE, not absolute. esbuild writes the
+    // module path into the bundle as a comment, so an absolute path would both
+    // make the build unreproducible across machines and publish the author's
+    // local directory layout in a public repository.
     pluginBuild.onResolve({ filter: /\?raw$/ }, (args) => ({
-      path: resolve(args.resolveDir, args.path.replace(/\?raw$/, '')),
+      path: relative(ROOT, resolve(args.resolveDir, args.path.replace(/\?raw$/, '')))
+        .split(sep)
+        .join('/'),
       namespace: 'raw-text',
     }));
 
     pluginBuild.onLoad({ filter: /.*/, namespace: 'raw-text' }, async (args) => ({
-      contents: await readFile(args.path, 'utf8'),
+      contents: await readFile(join(ROOT, args.path), 'utf8'),
       loader: 'text',
     }));
   },
