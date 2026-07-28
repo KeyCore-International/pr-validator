@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Test, bundles and neutrality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Test
+        run: npm test
+
+      # The bundles are committed and executed straight from the repository.
+      # Without this gate, editing src/ and forgetting to rebuild ships an
+      # action that silently runs the previous version.
+      - name: Bundles match src/
+        run: npm run build:check
+
+      # This tool was extracted from a private client repository into a public
+      # one. A leaked customer name here is public forever, so the check is a
+      # permanent gate rather than a one-time review.
+      - name: Neutrality
+        run: npm run check:neutrality

@@ -1,0 +1,34 @@
+node_modules/
+
+# Local env for running checks outside CI
+.env
+.env.*
+!.env.example
+
+# CI runtime artifacts written during a check run
+verdict.json
+verdicts/
+report.md
+comment.md
+task-description.txt
+criteria.md
+*.err
+
+# Internal planning docs. They reference the client repository this tool was
+# extracted from, so they must never reach the public repository.
+plans/
+
+# Tooling
+coverage/
+.vitest/
+*.log
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# NOTE: actions/*/dist/ is intentionally NOT ignored.
+# GitHub runs the bundled action code straight from the repo, so the bundles are
+# committed on purpose and verified against src/ by `npm run build:check` in CI.

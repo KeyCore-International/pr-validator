@@ -1,0 +1,56 @@
+name: 'PR Validator — run check'
+description: 'Run one PR validation check and write its verdict as verdict.json.'
+
+inputs:
+  check:
+    description: 'Check to run: criteria | security | rules'
+    required: true
+  base:
+    description: 'Base ref to diff against (e.g. origin/develop)'
+    required: true
+  head:
+    description: 'Ref under review'
+    required: false
+    default: 'HEAD'
+  repo:
+    description: 'Path to the git repository to inspect'
+    required: false
+    default: '.'
+  out:
+    description: 'Path of the verdict file to write'
+    required: false
+    default: 'verdict.json'
+  model:
+    description: 'Gateway model id. Overrides the check default.'
+    required: false
+    default: ''
+
+outputs:
+  status:
+    description: 'pass | fail | tool-error | skipped'
+    value: ${{ steps.run.outputs.status }}
+  blocking-failure:
+    description: 'true when this verdict must turn the job red'
+    value: ${{ steps.run.outputs.blocking-failure }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: run
+      shell: bash
+      # The bundle always exits 0. A blocking failure travels through the
+      # `blocking-failure` output so the caller can gate AFTER the verdict has
+      # been uploaded as an artifact — exiting non-zero here would kill the job
+      # first and the consolidated comment would lose this check.
+      run: node "$GITHUB_ACTION_PATH/dist/index.mjs"
+      env:
+        INPUT_CHECK: ${{ inputs.check }}
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_HEAD: ${{ inputs.head }}
+        INPUT_REPO: ${{ inputs.repo }}
+        INPUT_OUT: ${{ inputs.out }}
+        INPUT_MODEL: ${{ inputs.model }}
+        PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_BODY: ${{ github.event.pull_request.body }}
+        PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}

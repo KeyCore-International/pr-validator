@@ -1,0 +1,12 @@
+# Every change to this repository is reviewed by the maintainers.
+# This repository is consumed by other organizations through a reusable
+# workflow pinned to a moving major tag, so an unreviewed change ships
+# straight into other teams' CI.
+
+*                               @anthonygarciakeycore
+
+# Extra care: these define the public contract (workflow inputs, action
+# interface) and the executed bundles. A breaking change here requires a
+# new major tag.
+/.github/workflows/             @anthonygarciakeycore
+/actions/                       @anthonygarciakeycore

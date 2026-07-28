@@ -1,0 +1,17 @@
+# Force LF everywhere, including in the working tree on Windows.
+#
+# This is not cosmetic: `npm run build:check` compares the committed bundle
+# against a freshly built one byte for byte. esbuild emits LF, so a checkout
+# that converted the bundle to CRLF would make CI report the bundle as stale on
+# every run, on a machine where nothing is actually wrong.
+* text=auto eol=lf
+
+*.mjs   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+
+# Generated bundles: keep them out of diffs and merge conflicts. They are
+# rebuilt from src/ and verified by CI, never merged by hand.
+actions/*/dist/index.mjs -diff linguist-generated=true

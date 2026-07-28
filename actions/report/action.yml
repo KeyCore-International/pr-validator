@@ -1,0 +1,34 @@
+name: 'PR Validator — report'
+description: 'Collect every check verdict and publish a single consolidated PR comment.'
+
+inputs:
+  verdicts-dir:
+    description: 'Directory holding the downloaded verdict artifacts'
+    required: false
+    default: 'verdicts'
+  checks:
+    description: 'Comma-separated list of checks the workflow was asked to run'
+    required: true
+  token:
+    description: 'Token used to publish the comment. Needs pull-requests: write.'
+    required: false
+    default: ${{ github.token }}
+  dry-run:
+    description: 'Print the comment instead of publishing it'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - shell: bash
+      # Never gates. The individual check jobs already carry the verdicts; a
+      # failure to publish the comment must not fail the pull request.
+      run: node "$GITHUB_ACTION_PATH/dist/index.mjs"
+      env:
+        INPUT_VERDICTS_DIR: ${{ inputs.verdicts-dir }}
+        INPUT_CHECKS: ${{ inputs.checks }}
+        INPUT_DRY_RUN: ${{ inputs.dry-run }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}

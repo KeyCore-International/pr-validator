@@ -1,0 +1,164 @@
+name: PR Validation
+
+# THE PRODUCT. Consuming repositories call this workflow; everything else in
+# this repository exists to serve it.
+#
+# Public contract — inputs and secrets below. Changing them incompatibly means
+# a new major tag; the `v1` tag must never start behaving differently for the
+# repositories already pinned to it.
+#
+# The caller needs:
+#   permissions: { contents: read, pull-requests: write }
+#   secrets: inherit          (or the secrets listed below, explicitly)
+
+on:
+  workflow_call:
+    inputs:
+      checks:
+        description: 'Comma-separated checks to run: criteria, security, rules'
+        type: string
+        required: false
+        default: 'criteria,security,rules'
+      base:
+        description: 'Base branch the pull request targets'
+        type: string
+        required: false
+        default: 'develop'
+      config-path:
+        description: 'Per-repository configuration file'
+        type: string
+        required: false
+        default: '.pr-validator.json'
+      node-version:
+        description: 'Node version used to run the checks'
+        type: string
+        required: false
+        default: '20'
+      runs-on:
+        description: 'Runner label for the check jobs'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+    secrets:
+      AI_GATEWAY_API_KEY:
+        description: 'AI gateway key. Required by every AI check.'
+        required: true
+      TASKS_API_EMAIL:
+        description: 'Read-only task-manager service account. Only for the criteria check.'
+        required: false
+      TASKS_API_PASSWORD:
+        description: 'Password for that service account.'
+        required: false
+
+jobs:
+  setup:
+    name: Resolve checks
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      # Built here rather than inline in `strategy.matrix` so the public input
+      # stays a plain comma-separated string while the matrix gets real JSON.
+      # Node rather than jq: the jq program would need escaped regex inside a
+      # YAML block scalar inside a shell string, and that is three layers of
+      # escaping waiting to go wrong.
+      - id: matrix
+        shell: bash
+        env:
+          CHECKS: ${{ inputs.checks }}
+        run: |
+          matrix=$(node -e 'const a=(process.env.CHECKS||"").split(",").map(s=>s.trim()).filter(Boolean); if(!a.length){console.error("::error::input `checks` is empty");process.exit(1);} console.log(JSON.stringify(a));')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$(node -e "console.log(JSON.parse(process.argv[1]).length)" "$matrix")" >> "$GITHUB_OUTPUT"
+          echo "Checks to run: $matrix"
+
+  checks:
+    name: ${{ matrix.check }}
+    needs: setup
+    runs-on: ${{ inputs.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Run ${{ matrix.check }}
+        id: run
+        uses: KeyCore-International/pr-validator/actions/run-check@v1
+        with:
+          check: ${{ matrix.check }}
+          base: origin/${{ inputs.base }}
+        env:
+          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
+          TASKS_API_URL: ${{ vars.TASKS_API_URL }}
+          TASKS_API_EMAIL: ${{ secrets.TASKS_API_EMAIL }}
+          TASKS_API_PASSWORD: ${{ secrets.TASKS_API_PASSWORD }}
+          PR_VALIDATOR_MODEL: ${{ vars.PR_VALIDATOR_MODEL }}
+
+      # Upload BEFORE gating. The gate below can fail the job, and a failed job
+      # would never reach this step — the consolidated comment would lose this
+      # check and show it as "sin resultado".
+      - name: Upload verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verdict-${{ matrix.check }}
+          path: verdict.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Gate
+        if: always()
+        shell: bash
+        env:
+          BLOCKING: ${{ steps.run.outputs.blocking-failure }}
+          STATUS: ${{ steps.run.outputs.status }}
+          CHECK: ${{ matrix.check }}
+        run: |
+          case "$STATUS" in
+            tool-error)
+              echo "::warning::$CHECK: error de herramienta — no bloquea." ;;
+            skipped)
+              echo "$CHECK: omitido." ;;
+          esac
+          if [ "$BLOCKING" = "true" ]; then
+            echo "::error::$CHECK no pasó — ver el comentario del PR."
+            exit 1
+          fi
+          echo "$CHECK OK."
+
+  report:
+    name: Reporte
+    needs: [setup, checks]
+    # `always()` so the comment includes the checks that failed, not just the
+    # ones that passed.
+    if: always()
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Download verdicts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: verdict-*
+          path: verdicts
+
+      - name: Publish consolidated comment
+        uses: KeyCore-International/pr-validator/actions/report@v1
+        with:
+          verdicts-dir: verdicts
+          checks: ${{ inputs.checks }}

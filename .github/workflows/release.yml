@@ -1,0 +1,67 @@
+name: Release
+
+# Moving the major tag is what actually ships to every consuming repository:
+# they pin `@v1`, so this workflow is the deploy button for other teams' CI.
+#
+# Guards before the tag moves:
+#   - the full test suite passes
+#   - the committed bundles match src/
+#   - nothing non-neutral is in the tree
+#
+# A tag that fails any of these is left where it is, pointing at the previous
+# good release.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Verify and move the major tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Test
+        run: npm test
+
+      - name: Bundles match src/
+        run: npm run build:check
+
+      - name: Neutrality
+        run: npm run check:neutrality
+
+      - name: Tag matches package version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::El tag $GITHUB_REF_NAME no coincide con package.json ($pkg)."
+            exit 1
+          fi
+          echo "Versión $pkg."
+
+      - name: Move the major tag
+        shell: bash
+        run: |
+          major="${GITHUB_REF_NAME%%.*}"
+          echo "Moviendo $major -> $GITHUB_REF_NAME"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f "$major" "$GITHUB_REF_NAME"
+          git push origin "$major" --force
+          echo "Los repositorios que fijan @$major reciben esta versión en su próximo PR."

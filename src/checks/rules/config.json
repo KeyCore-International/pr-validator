@@ -1,0 +1,6 @@
+{
+  "blocking": true,
+  "maxDiffChars": 36000,
+  "maxRulesChars": 48000,
+  "failOn": ["violated"]
+}
