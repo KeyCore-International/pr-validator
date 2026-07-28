@@ -119,7 +119,7 @@ function renderComment({ verdicts, expected, taskId = null, headRef = "" }) {
   const missing = order.filter((name) => !byCheck.has(name));
   if (missing.length) {
     out.push(
-      `> Sin resultado de: ${missing.join(", ")}. El job pudo haberse cancelado o agotado su tiempo.`,
+      `> Sin resultado de: ${missing.join(", ")}. El job pudo haberse cancelado, agotado su tiempo, o no haber podido subir su veredicto \u2014 revisa si la organizaci\xF3n agot\xF3 su cuota de almacenamiento de Actions.`,
       ""
     );
   }

@@ -4,6 +4,42 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/): los tags `vX.Y.Z` son inmutables
 y el tag `vX` se mueve al último release de ese major.
 
+## [2.0.1] — 2026-07-28
+
+### Corregido
+
+- Los veredictos ya no viajan como artifacts. Subirlos consumía almacenamiento
+  de Actions, y una organización que agotó su cuota vio los tres checks en rojo
+  —`Artifact storage quota has been hit`— sin comentario que explicara nada.
+  Una cuota llena no es un problema del código y no puede bloquear un merge.
+
+  Ahora cada instancia de la matriz emite su veredicto como job output y el job
+  `report` reconstruye el directorio. El gate deja de consumir almacenamiento y
+  deja de depender de él. `report.mjs` no cambia.
+
+  **Para quien añada un check:** hay que declarar su output en
+  `jobs.checks.outputs`. Es el único punto donde un check nuevo toca el
+  workflow; los nombres de output no se pueden calcular.
+
+- Los ejemplos de instalación usaban `secrets: inherit`, que **solo propaga
+  cuando quien llama y el workflow llamado están en la misma organización o
+  enterprise**. Este validador vive en una organización distinta a la de casi
+  todos sus consumidores, así que con `inherit` no llegaba ninguna credencial y
+  el gate se quejaba de un secret ausente que sí existía. Los ejemplos ahora
+  pasan cada secret nombrado, y `AGENTS.md` lo registra como trampa conocida
+  para que nadie los "simplifique" de vuelta.
+
+- `AI_GATEWAY_API_KEY` pasa a `required: false` en la firma del reusable
+  workflow. Con `required: true`, un repositorio sin el secret no llegaba a
+  ejecutar nada: GitHub rechazaba la llamada con *«Secret AI_GATEWAY_API_KEY is
+  required, but not provided»* y todos los jobs salían en rojo, sin comentario
+  que explicara nada. Justo el desenlace que este gate promete no producir.
+
+  Declarado opcional, los checks corren y `run-check` reporta la ausencia como
+  error de herramienta: advertencia visible que nombra el secret, sin bloquear
+  el merge. El secret sigue siendo necesario para que los checks revisen algo;
+  lo que cambia es cómo se reporta que falta.
+
 ## [2.0.0] — 2026-07-28
 
 ### Cambios incompatibles

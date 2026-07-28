@@ -10,8 +10,8 @@ Actions → Organization). Así un repositorio nuevo los hereda sin configuraci�
 
 Si no tienes permisos de administrador de la organización, los mismos nombres a
 nivel de repositorio (Settings → Secrets and variables → Actions) funcionan
-igual: `secrets: inherit` propaga los secrets del repositorio llamador, y `vars`
-también se resuelve contra él. Lo único que pierdes es heredarlos en el
+igual: el workflow del paso 2 pasa los secrets del repositorio llamador, y
+`vars` también se resuelve contra él. Lo único que pierdes es heredarlos en el
 siguiente repositorio.
 
 | Nombre | Tipo | Requerido | Valor |
@@ -65,11 +65,27 @@ jobs:
     with:
       checks: 'criteria,security,rules'
       base: develop
-    secrets: inherit
+    secrets:
+      AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
+      TASKS_API_EMAIL: ${{ secrets.TASKS_API_EMAIL }}
+      TASKS_API_PASSWORD: ${{ secrets.TASKS_API_PASSWORD }}
 ```
 
-`permissions` y `secrets: inherit` son obligatorios: sin el primero el gate no
-puede publicar el comentario, y sin el segundo no recibe las credenciales.
+`permissions` es obligatorio: sin él el gate no puede publicar el comentario.
+
+### Por qué los secrets van nombrados y no con `inherit`
+
+`secrets: inherit` **solo propaga cuando el workflow llamado vive en la misma
+organización o enterprise** que el que llama. Este validador vive en una
+organización distinta a la de casi todos sus consumidores, así que con `inherit`
+no llega ninguna credencial.
+
+El fallo resultante es de los que cuestan una tarde: el gate se queja de un
+secret ausente que sí existe y se ve en Settings, porque nunca cruzó el límite
+entre organizaciones.
+
+Nombrarlos uno por uno funciona en ambos casos. Omite los `TASKS_API_*` si no
+usas el check `criteria`.
 
 ### Ejemplos de `build-test`
 
