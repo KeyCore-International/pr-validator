@@ -8,13 +8,24 @@ los secrets.
 Cárgalos **a nivel de organización** (Settings → Secrets and variables →
 Actions → Organization). Así un repositorio nuevo los hereda sin configuración.
 
+Si no tienes permisos de administrador de la organización, los mismos nombres a
+nivel de repositorio (Settings → Secrets and variables → Actions) funcionan
+igual: `secrets: inherit` propaga los secrets del repositorio llamador, y `vars`
+también se resuelve contra él. Lo único que pierdes es heredarlos en el
+siguiente repositorio.
+
 | Nombre | Tipo | Requerido | Valor |
 | --- | --- | --- | --- |
 | `AI_GATEWAY_API_KEY` | secret | Sí | Clave del gateway de IA |
 | `TASKS_API_URL` | variable | Para `criteria` | URL base del gestor de tareas |
 | `TASKS_API_EMAIL` | secret | Para `criteria` | Cuenta de servicio **de solo lectura** |
 | `TASKS_API_PASSWORD` | secret | Para `criteria` | Contraseña de esa cuenta |
-| `PR_VALIDATOR_MODEL` | variable | No | Modelo por defecto |
+| `PR_VALIDATOR_MODEL` | variable | Sí | Modelo que ejecuta los checks |
+
+El validador **no elige modelo por ti**. Sin `PR_VALIDATOR_MODEL` los checks
+reportan error de herramienta —advertencia visible, sin bloquear el merge— en
+vez de correr con un modelo que nadie acordó. Puede fijarse por repositorio, o
+por check en `.pr-validator.json`.
 
 La cuenta del gestor de tareas debe ser una cuenta de servicio dedicada y sin
 permisos de escritura. Estas credenciales viven en repositorios de varias
@@ -50,7 +61,7 @@ jobs:
       # ...pasos propios de tu stack
 
   validate:
-    uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v1
+    uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v2
     with:
       checks: 'criteria,security,rules'
       base: develop
@@ -122,10 +133,15 @@ Abre un PR de prueba desde una rama `chore/`. Deberías ver:
 - `criteria` omitido en verde, por ser una rama exenta.
 
 Si `criteria` aparece como error de herramienta, revisa `TASKS_API_URL` y las
-credenciales. Si todos aparecen como error, falta `AI_GATEWAY_API_KEY`.
+credenciales. Si todos aparecen como error, falta `AI_GATEWAY_API_KEY` o
+`PR_VALIDATOR_MODEL`: el propio mensaje dice cuál.
 
 ## Actualizaciones
 
-Fijar `@v1` implica recibir cada corrección y mejora automáticamente en el
+Fijar `@v2` implica recibir cada corrección y mejora automáticamente en el
 siguiente PR, sin tocar el repositorio. Para congelar una versión concreta,
-fija `@v1.0.0`.
+fija `@v2.0.0`.
+
+`@v1` sigue existiendo y no cambia: elige un modelo por su cuenta cuando
+`PR_VALIDATOR_MODEL` no está definido. Para subir a `@v2` basta con definir esa
+variable antes de mover la referencia.

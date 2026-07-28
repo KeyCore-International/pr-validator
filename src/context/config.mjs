@@ -7,11 +7,14 @@
 // defaults and below workflow inputs; it is wired in F2.7. `configPath` is
 // already accepted here so the call sites do not change when it lands.
 
-export const DEFAULT_MODEL = 'minimax/minimax-m3';
+// There is deliberately no default model. A silent fallback means a repository
+// that never set `PR_VALIDATOR_MODEL` still gets verdicts — from a model nobody
+// chose, whose cost and accuracy nobody agreed to. Better to say so out loud:
+// `resolveConfig` returns an empty model and the runner reports it as a tool
+// error, which warns without blocking the merge.
 
 /** Values that apply to every check unless something overrides them. */
 export const VALIDATOR_DEFAULTS = {
-  model: DEFAULT_MODEL,
   blocking: true,
   attempts: 3,
   maxDiffChars: 36000,
@@ -43,13 +46,10 @@ export function resolveConfig({ check, checkConfig = {}, repoConfig = {}, inputs
 
   return {
     check,
-    model: firstDefined(
-      inputs.model,
-      perCheckRepo.model,
-      repoConfig.model,
-      checkConfig.model,
-      VALIDATOR_DEFAULTS.model,
-    ),
+    // No trailing default: an unconfigured model resolves to '' and the runner
+    // turns that into a tool error naming the missing variable.
+    model:
+      firstDefined(inputs.model, perCheckRepo.model, repoConfig.model, checkConfig.model) ?? '',
     blocking: Boolean(
       firstDefined(
         inputs.blocking,

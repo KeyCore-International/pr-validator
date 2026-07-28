@@ -34838,9 +34838,7 @@ function rulesTruncationNote(rules) {
 }
 
 // src/context/config.mjs
-var DEFAULT_MODEL = "minimax/minimax-m3";
 var VALIDATOR_DEFAULTS = {
-  model: DEFAULT_MODEL,
   blocking: true,
   attempts: 3,
   maxDiffChars: 36e3,
@@ -34856,13 +34854,9 @@ function resolveConfig({ check: check2, checkConfig = {}, repoConfig = {}, input
   const perCheckRepo = repoConfig?.checks?.[check2] ?? {};
   return {
     check: check2,
-    model: firstDefined(
-      inputs.model,
-      perCheckRepo.model,
-      repoConfig.model,
-      checkConfig.model,
-      VALIDATOR_DEFAULTS.model
-    ),
+    // No trailing default: an unconfigured model resolves to '' and the runner
+    // turns that into a tool error naming the missing variable.
+    model: firstDefined(inputs.model, perCheckRepo.model, repoConfig.model, checkConfig.model) ?? "",
     blocking: Boolean(
       firstDefined(
         inputs.blocking,
@@ -35609,6 +35603,11 @@ async function runCheck({ inputs, env = process.env, log = console.error } = {})
   }
   if (!env.AI_GATEWAY_API_KEY) {
     return toolError("AI_GATEWAY_API_KEY no est\xE1 definido en el repositorio consumidor.");
+  }
+  if (!config2.model) {
+    return toolError(
+      "PR_VALIDATOR_MODEL no est\xE1 definido en el repositorio consumidor. Config\xFAralo como variable de Actions, o fija `model` en `.pr-validator.json`."
+    );
   }
   let result;
   try {
