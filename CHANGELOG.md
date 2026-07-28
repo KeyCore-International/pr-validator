@@ -4,6 +4,21 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/): los tags `vX.Y.Z` son inmutables
 y el tag `vX` se mueve al último release de ese major.
 
+## [2.0.1] — 2026-07-28
+
+### Corregido
+
+- `AI_GATEWAY_API_KEY` pasa a `required: false` en la firma del reusable
+  workflow. Con `required: true`, un repositorio sin el secret no llegaba a
+  ejecutar nada: GitHub rechazaba la llamada con *«Secret AI_GATEWAY_API_KEY is
+  required, but not provided»* y todos los jobs salían en rojo, sin comentario
+  que explicara nada. Justo el desenlace que este gate promete no producir.
+
+  Declarado opcional, los checks corren y `run-check` reporta la ausencia como
+  error de herramienta: advertencia visible que nombra el secret, sin bloquear
+  el merge. El secret sigue siendo necesario para que los checks revisen algo;
+  lo que cambia es cómo se reporta que falta.
+
 ## [2.0.0] — 2026-07-28
 
 ### Cambios incompatibles

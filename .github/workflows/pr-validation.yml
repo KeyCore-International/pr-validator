@@ -40,9 +40,17 @@ on:
         required: false
         default: 'ubuntu-latest'
     secrets:
+      # Needed by every AI check, but declared `required: false` on purpose.
+      # `required: true` makes GitHub reject the call before a single job
+      # starts — "Secret AI_GATEWAY_API_KEY is required, but not provided" —
+      # which turns a missing credential into a red, blocking failure with no
+      # comment explaining it. That is exactly the outcome this gate promises
+      # never to produce. Declared optional, the checks run and `run-check`
+      # reports the absence as a tool error: a visible warning that names the
+      # secret and lets the merge through.
       AI_GATEWAY_API_KEY:
-        description: 'AI gateway key. Required by every AI check.'
-        required: true
+        description: 'AI gateway key. Needed by every AI check.'
+        required: false
       TASKS_API_EMAIL:
         description: 'Read-only task-manager service account. Only for the criteria check.'
         required: false

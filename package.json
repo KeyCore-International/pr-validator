@@ -1,6 +1,6 @@
 {
   "name": "pr-validator",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "type": "module",
   "description": "Reusable GitHub Actions workflow that validates pull requests: acceptance criteria, security, project rules, quality, duplication and test coverage.",
