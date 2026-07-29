@@ -34,9 +34,8 @@ jobs:
       # ...los pasos de build y test propios de tu stack
 
   validate:
-    uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v2
+    uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v3
     with:
-      checks: 'criteria,security,rules'
       base: develop
     secrets:
       AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
@@ -54,10 +53,33 @@ Guía completa en [`docs/INSTALL.md`](docs/INSTALL.md). Detalle de cada check en
 
 | Input | Default | Descripción |
 | --- | --- | --- |
-| `checks` | `criteria,security,rules` | Checks a ejecutar, separados por coma |
+| `checks` | *(vacío)* | Checks a ejecutar, separados por coma. Vacío = lo que diga `.pr-validator.json`, y si no lo dice, todos |
 | `base` | `develop` | Rama base contra la que se calcula el diff |
 | `config-path` | `.pr-validator.json` | Configuración por repositorio |
 | `node-version` | `20` | Versión de Node del runner |
+
+### `.pr-validator.json`
+
+Opcional, en la raíz del repositorio consumidor. Permite ajustar el gate sin tocar el validador:
+
+```json
+{
+  "model": "proveedor/modelo",
+  "checks": ["criteria", "security", "rules", "quality", "tests"],
+  "checksConfig": {
+    "duplication": { "model": "proveedor/modelo-mas-capaz", "threshold": 0.7 },
+    "quality": { "blocking": false }
+  }
+}
+```
+
+Precedencia, de menor a mayor: **defaults del validador < `config.json` del check < este archivo < inputs del workflow**.
+
+Claves por check: `model`, `blocking`, `attempts`, `maxDiffChars`, `maxRulesChars`, `failOn`, y `threshold` / `maxCandidates` para `duplication`.
+
+Si sólo vas a configurar checks y no a elegir cuáles corren, puedes usar `"checks"` como objeto en vez de `"checksConfig"`.
+
+**Un archivo mal formado no bloquea nada**: se reporta como advertencia y el gate sigue con los valores por defecto. Una clave que el validador no reconoce se nombra en el comentario, para que un `blokcing: false` no pase por configurado durante meses.
 
 ### Secrets y variables
 
@@ -78,25 +100,33 @@ Se definen en el repositorio consumidor, o mejor a nivel de organización. **Est
 | `criteria` | Criterios de aceptación de la tarea referenciada por el PR | Sí |
 | `security` | Vulnerabilidades introducidas por el diff | Sí (severidad alta) |
 | `rules` | Convenciones que el propio repositorio documentó | Sí |
-| `quality` | Principios universales: SOLID, complejidad, naming, código muerto | No |
-| `duplication` | Símbolos nuevos que replican lógica ya existente | No |
-| `tests` | Símbolos públicos nuevos sin cobertura de tests | No |
+| `quality` | Diseño: SOLID, complejidad, naming, código muerto, manejo de errores, números mágicos, idempotencia | Sí (severidad alta) |
+| `duplication` | Métodos y funciones nuevos que replican lógica ya existente | Sí |
+| `tests` | Símbolos públicos nuevos que ningún test menciona | Sí |
 
-Un check que falla por infraestructura (red, gateway, credenciales) **nunca bloquea**: se reporta como advertencia tras 3 reintentos.
+Un hallazgo pertenece a **un solo check**: `quality` revisa cómo está construido el código y no reporta vulnerabilidades, que son territorio exclusivo de `security`. Si el mismo problema saliera dos veces con dos redacciones, el desarrollador tendría que decidir cuál de los dos informes es el bueno.
+
+Un check que falla por infraestructura (red, gateway, credenciales, cuota) **nunca bloquea**: se reporta como advertencia tras 3 reintentos.
+
+Los checks que revisan código —`security`, `quality`, `duplication` y `tests`— **se omiten en verde cuando el diff no toca código**. Cuenta como código todo salvo texto plano documental y binarios: los YAML de workflow, los JSON de configuración, Terraform, Dockerfiles y SQL sí se revisan, porque ahí es donde viven los secretos embebidos.
 
 ## Referencia de tarea
 
 Para el check `criteria`, el id de la tarea se busca en este orden:
 
-1. **Título del PR** — `#2803`, `[2803]`, o `feat(scope): descripción (#2803)`
-2. **Nombre de rama** — `feature/2803-slug`
+1. **Nombre de rama** — `<id>-slug` bajo cualquier prefijo: `feature/2803-slug`, `fix/2803-slug`, o `2803-slug` a secas
+2. **Título del PR** — `#2803`, `[2803]`, o `feat(scope): descripción (#2803)`
 3. **Cuerpo del PR** — un bloque cercado con el lenguaje `criteria`
 
-Las ramas con prefijo `chore/`, `hotfix/`, `release/`, `dependabot/` o `renovate/` quedan exentas y el check pasa en verde.
+Dentro de la fuente que gana, el primer id es el que se evalúa; los demás ids que aparezcan en cualquier parte viajan como **contexto** para el modelo, y sus criterios nunca se exigen. Así un cuerpo que diga «corrección de la incidencia #3002 de la tarea #3001» se evalúa contra la incidencia, con la tarea original como trasfondo.
+
+**La convención de nombres es un atajo, no una regla.** Nómbrala `<id>-slug` y el id se detecta sin que nadie escriba nada; si no, ponlo en el título. Un PR que no referencia ninguna tarea **no se bloquea**: `criteria` se omite en verde y el resto de checks sigue corriendo y sigue pudiendo frenar el merge. El gate frena por lo que el código tiene, nunca por cómo se llama la rama.
+
+Cuando el diff no se corresponde con la tarea referenciada, el check lo dice con esas palabras en vez de listar criterios incumplidos: el problema es la referencia, no el código.
 
 ## Versionado
 
-Tags `vX.Y.Z` inmutables y un tag móvil `vX` que siempre apunta al último release de ese major. Fijar `@v2` recibe correcciones y mejoras automáticamente; fijar `@v2.0.0` congela la versión.
+Tags `vX.Y.Z` inmutables y un tag móvil `vX` que siempre apunta al último release de ese major. Fijar `@v3` recibe correcciones y mejoras automáticamente; fijar `@v3.0.0` congela la versión.
 
 Un cambio incompatible siempre implica un major nuevo.
 

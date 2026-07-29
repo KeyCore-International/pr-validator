@@ -1,20 +1,32 @@
 // Resolve which task a pull request belongs to.
 //
-// Phase 1 resolves from the branch name only, matching the behaviour this tool
-// had before it was extracted. `prTitle` is already part of the signature so
-// that adding title resolution later does not change any call site.
+// Three sources, in order of precedence: branch name, PR title, PR body. The
+// branch comes first because it is the one place the id appears without anybody
+// having to remember anything — but a title-declared id resolves just as well.
+//
+// The naming convention is a shortcut, not a rule. There is deliberately no
+// "invalid" mode: a pull request carrying no task reference has nothing to
+// validate against, which is not the same as a violation. That mode used to be
+// the only source of a blocking verdict about metadata rather than about code,
+// and deleting it is what makes that outcome impossible rather than merely
+// discouraged.
 //
 // Modes:
-//   task    -> a task id was resolved; the criteria check runs
-//   exempt  -> the branch is not task work (chores, hotfixes, back-merges);
-//              the criteria check passes green without running
-//   invalid -> no id anywhere and no exemption; the convention is enforced
+//   task -> a subject was resolved; the criteria check runs against it
+//   none -> no reference anywhere; the criteria check is skipped, green
 
-/** Branch prefixes and long-lived branches that legitimately carry no task. */
-export const EXEMPT_PATTERN =
-  /^(?:chore|hotfix|release|dependabot|renovate)\/|^(?:master|main|qa|develop)$/;
+/** `fix/3002-slug`, `3002-slug`, `feature/3002-slug` — any prefix, or none. */
+const BRANCH_ID = /(?:^|\/)(\d+)-/;
 
-const BRANCH_TASK_PATTERN = /^feature\/(\d+)-/;
+/** `#3002`, `[3002]`, `(#3002)` — the forms a developer actually writes. */
+const TEXT_ID = /#(\d+)|\[(\d+)\]|\((?:#)?(\d+)\)/g;
+
+/**
+ * Extra tasks pulled in as context. Bounded because each one is a request and a
+ * slice of the prompt budget, and a pull request that genuinely spans more than
+ * a handful of tasks has a problem no amount of context will fix.
+ */
+export const MAX_CONTEXT_TASKS = 3;
 
 /**
  * Extract a fenced ```criteria block from a PR body.
@@ -26,34 +38,78 @@ export function extractCriteriaBlock(prBody) {
 }
 
 /**
+ * Every task id in a free-text field, in the order they appear.
+ * @returns {string[]}
+ */
+export function idsFromText(text) {
+  const out = [];
+  for (const match of String(text || '').matchAll(TEXT_ID)) {
+    const id = match[1] ?? match[2] ?? match[3];
+    if (id) out.push(id);
+  }
+  return out;
+}
+
+/** The single id a branch name carries, if any. */
+export function idFromBranch(headRef) {
+  const match = String(headRef || '').match(BRANCH_ID);
+  return match ? match[1] : null;
+}
+
+/**
  * @param {object} opts
  * @param {string} opts.headRef   PR head branch name.
- * @param {string} [opts.prTitle] PR title. Ignored in phase 1 (see F2.1).
- * @param {string} [opts.prBody]  PR body, for the fallback criteria block.
+ * @param {string} [opts.prTitle] PR title.
+ * @param {string} [opts.prBody]  PR body.
  * @returns {{
- *   mode: 'task'|'exempt'|'invalid',
- *   taskId: string|null,
+ *   mode: 'task'|'none',
+ *   subjectId: string|null,
  *   source: 'branch'|'title'|'body'|null,
+ *   contextIds: string[],
  *   criteriaBlock: string
  * }}
  */
 export function resolveTaskRef({ headRef = '', prTitle = '', prBody = '' } = {}) {
   const criteriaBlock = extractCriteriaBlock(prBody);
 
-  const fromBranch = headRef.match(BRANCH_TASK_PATTERN);
-  if (fromBranch) {
-    return { mode: 'task', taskId: fromBranch[1], source: 'branch', criteriaBlock };
+  const branchId = idFromBranch(headRef);
+  const titleIds = idsFromText(prTitle);
+  const bodyIds = idsFromText(prBody);
+
+  // Precedence picks the source; inside the winning source the first id wins.
+  // Positional on purpose: two runs over the same pull request have to choose
+  // the same subject, and "the first one" is the only rule that guarantees it.
+  let subjectId = null;
+  let source = null;
+  if (branchId) {
+    subjectId = branchId;
+    source = 'branch';
+  } else if (titleIds.length) {
+    subjectId = titleIds[0];
+    source = 'title';
+  } else if (bodyIds.length) {
+    subjectId = bodyIds[0];
+    source = 'body';
   }
 
-  if (EXEMPT_PATTERN.test(headRef)) {
-    return { mode: 'exempt', taskId: null, source: null, criteriaBlock };
+  if (!subjectId) {
+    // A hand-written criteria block is still a usable contract with no id at
+    // all: the author wrote down what the change has to satisfy.
+    if (criteriaBlock) {
+      return { mode: 'task', subjectId: null, source: 'body', contextIds: [], criteriaBlock };
+    }
+    return { mode: 'none', subjectId: null, source: null, contextIds: [], criteriaBlock };
   }
 
-  // A branch with no id that is not exempt still has a usable fallback if the
-  // author wrote the criteria into the PR body by hand.
-  if (criteriaBlock) {
-    return { mode: 'task', taskId: null, source: 'body', criteriaBlock };
+  // Everything else mentioned anywhere travels as context. A body reading
+  // "incidencia #3002 de la tarea #3001" makes #3001 available to the model
+  // without ever turning its criteria into a requirement.
+  const contextIds = [];
+  for (const id of [branchId, ...titleIds, ...bodyIds]) {
+    if (!id || id === subjectId || contextIds.includes(id)) continue;
+    contextIds.push(id);
+    if (contextIds.length === MAX_CONTEXT_TASKS) break;
   }
 
-  return { mode: 'invalid', taskId: null, source: null, criteriaBlock };
+  return { mode: 'task', subjectId, source, contextIds, criteriaBlock };
 }

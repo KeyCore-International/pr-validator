@@ -3,7 +3,7 @@ description: 'Run one PR validation check and write its verdict as verdict.json.
 
 inputs:
   check:
-    description: 'Check to run: criteria | security | rules'
+    description: 'Check to run: criteria | security | rules | quality | tests'
     required: true
   base:
     description: 'Base ref to diff against (e.g. origin/develop)'
@@ -24,6 +24,10 @@ inputs:
     description: 'Gateway model id. Overrides the check default.'
     required: false
     default: ''
+  config-path:
+    description: 'Per-repository settings file, relative to the repo root.'
+    required: false
+    default: '.pr-validator.json'
 
 outputs:
   status:
@@ -50,6 +54,7 @@ runs:
         INPUT_REPO: ${{ inputs.repo }}
         INPUT_OUT: ${{ inputs.out }}
         INPUT_MODEL: ${{ inputs.model }}
+        INPUT_CONFIG_PATH: ${{ inputs.config-path }}
         PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_BODY: ${{ github.event.pull_request.body }}

@@ -18,6 +18,7 @@ const VERIFY = process.argv.includes('--verify');
 const TARGETS = [
   { entry: 'src/entries/run-check.mjs', out: 'actions/run-check/dist/index.mjs' },
   { entry: 'src/entries/report.mjs', out: 'actions/report/dist/index.mjs' },
+  { entry: 'src/entries/resolve-checks.mjs', out: 'actions/resolve-checks/dist/index.mjs' },
 ];
 
 /**

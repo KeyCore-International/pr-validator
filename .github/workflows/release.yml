@@ -45,6 +45,12 @@ jobs:
       - name: Neutrality
         run: npm run check:neutrality
 
+      # The workflow pins its own composite actions by major tag. A stale pin
+      # ships a working build of the PREVIOUS release's code to every consumer,
+      # silently.
+      - name: Action pins match the major
+        run: npm run check:pins
+
       - name: Tag matches package version
         shell: bash
         run: |

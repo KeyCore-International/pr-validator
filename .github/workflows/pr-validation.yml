@@ -17,10 +17,13 @@ on:
   workflow_call:
     inputs:
       checks:
-        description: 'Comma-separated checks to run: criteria, security, rules'
+        description: >-
+          Comma-separated checks to run: criteria, security, rules, quality,
+          duplication, tests. Empty means the repository's `.pr-validator.json`
+          decides, and failing that, all of them.
         type: string
         required: false
-        default: 'criteria,security,rules'
+        default: ''
       base:
         description: 'Base branch the pull request targets'
         type: string
@@ -68,20 +71,22 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       count: ${{ steps.matrix.outputs.count }}
     steps:
-      # Built here rather than inline in `strategy.matrix` so the public input
-      # stays a plain comma-separated string while the matrix gets real JSON.
-      # Node rather than jq: the jq program would need escaped regex inside a
-      # YAML block scalar inside a shell string, and that is three layers of
-      # escaping waiting to go wrong.
+      # The repository is checked out because the check list can also come from
+      # its `.pr-validator.json`. Shallow: this job reads one file.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      # An action rather than an inline script, so the list of valid names comes
+      # from the check registry instead of a string duplicated into YAML. A name
+      # list that lives in two places disagrees with itself the first time
+      # somebody adds a check.
       - id: matrix
-        shell: bash
-        env:
-          CHECKS: ${{ inputs.checks }}
-        run: |
-          matrix=$(node -e 'const a=(process.env.CHECKS||"").split(",").map(s=>s.trim()).filter(Boolean); if(!a.length){console.error("::error::input `checks` is empty");process.exit(1);} console.log(JSON.stringify(a));')
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "count=$(node -e "console.log(JSON.parse(process.argv[1]).length)" "$matrix")" >> "$GITHUB_OUTPUT"
-          echo "Checks to run: $matrix"
+        uses: KeyCore-International/pr-validator/actions/resolve-checks@v3
+        with:
+          checks: ${{ inputs.checks }}
+          config-path: ${{ inputs.config-path }}
 
   checks:
     name: ${{ matrix.check }}
@@ -94,7 +99,7 @@ jobs:
     # One output per check, and one line each, because output names cannot be
     # computed. Every matrix instance writes only its own key and leaves the
     # rest empty; GitHub merges the instances and an empty value never
-    # overwrites a filled one, so `report` sees all three.
+    # overwrites a filled one, so `report` sees every one of them.
     #
     # The verdicts used to travel as artifacts, which is the obvious design and
     # the wrong one: uploading needs Actions storage, and an organization that
@@ -107,6 +112,9 @@ jobs:
       criteria: ${{ steps.emit.outputs.criteria }}
       security: ${{ steps.emit.outputs.security }}
       rules: ${{ steps.emit.outputs.rules }}
+      quality: ${{ steps.emit.outputs.quality }}
+      duplication: ${{ steps.emit.outputs.duplication }}
+      tests: ${{ steps.emit.outputs.tests }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -117,12 +125,17 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
+      # Pinned to the SAME major this workflow ships under. A workflow published
+      # as v3 that called the v2 action would run the previous release's bundles
+      # and every change in v3 would be invisible to the consumer, with nothing
+      # in the logs to say so. The pin must move with every major.
       - name: Run ${{ matrix.check }}
         id: run
-        uses: KeyCore-International/pr-validator/actions/run-check@v2
+        uses: KeyCore-International/pr-validator/actions/run-check@v3
         with:
           check: ${{ matrix.check }}
           base: origin/${{ inputs.base }}
+          config-path: ${{ inputs.config-path }}
         env:
           AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
           TASKS_API_URL: ${{ vars.TASKS_API_URL }}
@@ -203,9 +216,12 @@ jobs:
           CRITERIA: ${{ needs.checks.outputs.criteria }}
           SECURITY: ${{ needs.checks.outputs.security }}
           RULES: ${{ needs.checks.outputs.rules }}
+          QUALITY: ${{ needs.checks.outputs.quality }}
+          DUPLICATION: ${{ needs.checks.outputs.duplication }}
+          TESTS: ${{ needs.checks.outputs.tests }}
         run: |
           mkdir -p verdicts
-          for check in criteria security rules; do
+          for check in criteria security rules quality duplication tests; do
             var=$(echo "$check" | tr '[:lower:]' '[:upper:]')
             body=${!var}
             [ -n "$body" ] || continue
@@ -215,7 +231,13 @@ jobs:
           done
 
       - name: Publish consolidated comment
-        uses: KeyCore-International/pr-validator/actions/report@v2
+        uses: KeyCore-International/pr-validator/actions/report@v3
         with:
           verdicts-dir: verdicts
-          checks: ${{ inputs.checks }}
+          # The RESOLVED list, not the raw input: the input may be empty, and
+          # this is what tells the comment which checks were expected and are
+          # therefore missing when a job dies without emitting a verdict.
+          # The `|| '[]'` matters: if `setup` itself died, the output is empty
+          # and `fromJSON('')` would fail the expression, losing the comment
+          # that explains what went wrong.
+          checks: ${{ join(fromJSON(needs.setup.outputs.matrix || '[]'), ',') }}

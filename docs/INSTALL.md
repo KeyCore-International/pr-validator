@@ -61,9 +61,8 @@ jobs:
       # ...pasos propios de tu stack
 
   validate:
-    uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v2
+    uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v3
     with:
-      checks: 'criteria,security,rules'
       base: develop
     secrets:
       AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
@@ -131,22 +130,40 @@ En Settings → Branches (o Rules), sobre la rama base:
    - `criteria`
    - `security`
    - `rules`
+   - `quality`
+   - `duplication`
+   - `tests`
 
-## 4. Convención de ramas
+## 4. Cómo referenciar la tarea
 
-- Trabajo de tarea: `feature/<id>-<slug>`, por ejemplo `feature/2803-filtro-fechas`.
-- Exentas, sin tarea asociada: `chore/`, `hotfix/`, `release/`, `dependabot/`,
-  `renovate/`, y las ramas largas `master`, `main`, `qa`, `develop`.
-- Cualquier otro nombre sin id de tarea falla el check `criteria`, con un
-  comentario que explica la convención.
+**Es un atajo, no una regla.** Ninguna de estas formas es obligatoria y ninguna
+ausencia bloquea un merge.
+
+- **Lo más cómodo:** nombra la rama `<id>-slug`, bajo el prefijo que quieras —
+  `feature/2803-filtro-fechas`, `fix/2803-error-texto`, o `2803-filtro` a secas.
+  El id se detecta sin que nadie escriba nada más.
+- **Si la rama ya se llama de otra forma:** pon el id en el título del PR, como
+  `#2803`, `[2803]` o `feat(scope): descripción (#2803)`.
+- **Si la tarea no está en el gestor:** un bloque cercado ` ```criteria ` en el
+  cuerpo del PR sirve de contrato.
+
+Cuando el PR menciona varias tareas, se evalúa contra la primera de la fuente de
+mayor precedencia y las demás entran como contexto. Un cuerpo que diga
+«corrección de la incidencia #3002 de la tarea #3001» se juzga contra la
+incidencia, no contra la tarea de la que salió.
+
+Un PR sin ninguna referencia **no falla**: `criteria` se omite en verde y
+`security`, `rules` y los demás siguen corriendo y siguen pudiendo frenar el
+merge.
 
 ## 5. Verificar la instalación
 
-Abre un PR de prueba desde una rama `chore/`. Deberías ver:
+Abre un PR de prueba desde una rama sin id, por ejemplo `chore/pr-validation`.
+Deberías ver:
 
-- Los tres checks en la lista del PR.
+- Los checks en la lista del PR.
 - Un único comentario con la tabla resumen.
-- `criteria` omitido en verde, por ser una rama exenta.
+- `criteria` omitido en verde, porque no hay tarea que validar.
 
 Si `criteria` aparece como error de herramienta, revisa `TASKS_API_URL` y las
 credenciales. Si todos aparecen como error, falta `AI_GATEWAY_API_KEY` o
@@ -154,10 +171,16 @@ credenciales. Si todos aparecen como error, falta `AI_GATEWAY_API_KEY` o
 
 ## Actualizaciones
 
-Fijar `@v2` implica recibir cada corrección y mejora automáticamente en el
+Fijar `@v3` implica recibir cada corrección y mejora automáticamente en el
 siguiente PR, sin tocar el repositorio. Para congelar una versión concreta,
-fija `@v2.0.0`.
+fija `@v3.0.0`.
 
-`@v1` sigue existiendo y no cambia: elige un modelo por su cuenta cuando
-`PR_VALIDATOR_MODEL` no está definido. Para subir a `@v2` basta con definir esa
-variable antes de mover la referencia.
+Los majors anteriores siguen existiendo y no cambian. Lo que hay que revisar
+antes de subir la referencia:
+
+- **De `@v1` a `@v2`**: define `PR_VALIDATOR_MODEL`; `v1` elegía un modelo por su
+  cuenta y `v2` no.
+- **De `@v2` a `@v3`**: el gate deja de bloquear por la nomenclatura de la rama y
+  empieza a correr `quality`, `duplication` y `tests`. Si tenías marcados los
+  checks como *required* en la protección de rama, añade los tres nuevos después
+  de su primera corrida.

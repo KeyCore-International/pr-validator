@@ -6,7 +6,7 @@ Guía para agentes de IA que trabajen en este repositorio.
 
 Un gate de validación de pull requests distribuido como **reusable workflow** de
 GitHub Actions. Otros repositorios, de otras organizaciones, lo consumen con
-`uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v2`.
+`uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v3`.
 
 Eso condiciona todo lo demás: **un cambio aquí llega al CI de equipos ajenos en
 cuanto se mueve el tag mayor.** No es una librería que alguien decide actualizar;
@@ -20,6 +20,7 @@ npm test                  # vitest sobre la lógica determinista
 npm run build             # empaqueta src/ en actions/*/dist/
 npm run build:check       # verifica que los bundles correspondan a src/
 npm run check:neutrality  # verifica que no haya nombres de cliente ni rutas locales
+npm run check:pins        # verifica que el workflow fije sus actions en el major correcto
 ```
 
 No hay linter configurado. Si añades uno, que sea en su propio cambio.
@@ -56,6 +57,12 @@ de `actions/*/action.yml`, son la superficie que otros repositorios ya usan.
 Un cambio incompatible exige un **major nuevo**. El tag `v1` jamás debe empezar a
 comportarse distinto para quien ya lo fijó.
 
+Y el major nuevo hay que subirlo **también dentro del workflow**: `pr-validation.yml`
+llama a sus propias composite actions con `@vN`, y ese pin tiene que ser el major
+que se publica. Estuvo a punto de salir un `v3` que llamaba a `run-check@v2`, es
+decir, tres versiones de cambios invisibles para el consumidor sin un solo error
+en los logs. `npm run check:pins` es el gate; corre en CI y antes de mover el tag.
+
 ### 4. Un fallo de infraestructura nunca bloquea
 
 Gateway caído, red, credenciales ausentes: eso es `tool-error`, se reporta como
@@ -68,17 +75,23 @@ gate.
 
 ```
 .github/workflows/pr-validation.yml   EL PRODUCTO — reusable (workflow_call)
+actions/resolve-checks/               composite action: lista de checks -> matriz
 actions/run-check/                    composite action: corre 1 check
 actions/report/                       composite action: publica el comentario
 src/
+  resolve-checks.mjs                  input + .pr-validator.json -> matriz validada
   run-check.mjs                       orquesta un check -> verdict.json
   report.mjs                          N verdicts -> 1 comentario
   gateway.mjs                         llamada al modelo + reintentos + parseo
-  context/                            diff, task-ref, tasks-api, rules, config
+  context/                            diff, task-ref, tasks-api, rules, config,
+                                      repo-config, files, coverage, duplication,
+                                      symbol-index
+  similarity/                         señales deterministas de duplicación
+  symbols/                            extractores por lenguaje
   checks/<nombre>/                    prompt.md + config.json + render.mjs
   report/                             verdict.mjs (esquema), comment.mjs (render)
   entries/                            entrypoints de los bundles
-scripts/                              build.mjs, neutrality.mjs
+scripts/                              build.mjs, neutrality.mjs, check-pins.mjs
 test/                                 vitest + fixtures
 ```
 
@@ -142,7 +155,13 @@ Un check es una carpeta autocontenida. El runner no se toca.
 hay que corregir. La separación impide que un check vuelque el texto íntegro de
 una tarea de cliente en un comentario público.
 
-Un check nuevo arranca **no bloqueante** hasta tener datos de precisión.
+Un check nuevo arranca **bloqueante**. Si los datos de precisión muestran ruido,
+se degrada a informativo dejando registrada la evidencia que lo justifica.
+
+> La política anterior era la contraria —arrancar informativo hasta tener
+> datos— y se cambió a conciencia: un check que nunca frena nada tampoco genera
+> la presión que hace que alguien mire sus falsos positivos, así que los datos
+> de precisión no llegaban nunca.
 
 ## Convenciones
 
@@ -159,6 +178,14 @@ Un check nuevo arranca **no bloqueante** hasta tener datos de precisión.
 
 ## Trampas conocidas
 
+- **Nada bloquea por metadatos.** Que falte el id de la tarea, que la rama se
+  llame de cualquier forma o que el gestor no devuelva un campo son estados sin
+  dato, no infracciones: el check se omite. `task-ref.mjs` **no tiene** un modo
+  «inválido» y no debe recuperarlo — la garantía vive en que ese estado no
+  existe, no en una comprobación que alguien pueda saltarse luego.
+- **Todo texto del autor del PR pasa por `untrustedBlock()`.** Es lo único del
+  prompt que controla un tercero en una herramienta que decide merges. Nunca lo
+  concatenes suelto, y que la evidencia de un veredicto salga siempre del diff.
 - **`secrets: inherit` no cruza organizaciones.** Solo propaga cuando quien
   llama y el workflow llamado están en la misma organización o enterprise —y
   casi ningún consumidor de este validador lo está. Los ejemplos de la
@@ -170,8 +197,11 @@ Un check nuevo arranca **no bloqueante** hasta tener datos de precisión.
 - **PRs desde forks** no reciben secrets. Se detectan y los checks de IA se
   omiten en verde. **Nunca uses `pull_request_target`** para esquivarlo: ejecuta
   código no confiable con acceso a secrets.
-- **La matriz de checks** se construye en un job `setup` con Node, no con una
-  expresión inline. La versión inline exigía escapes en tres capas.
+- **La matriz de checks** se construye en un job `setup` con una action propia,
+  no con una expresión inline. La versión inline exigía escapes en tres capas y,
+  peor, obligaba a repetir en YAML la lista de nombres válidos: dos copias que
+  se desincronizan el primer día que alguien añade un check. Ahora sale de
+  `listChecks()`.
 - **Todo truncado se declara.** Diff y corpus de reglas tienen presupuesto; si se
   recorta, el comentario dice cuánto y cuántos archivos quedaron fuera. Truncar
   en silencio fue el fallo más grave de la generación anterior de esta

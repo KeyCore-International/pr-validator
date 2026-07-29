@@ -1,0 +1,5 @@
+{
+  "blocking": true,
+  "maxDiffChars": 36000,
+  "failOn": ["high"]
+}

@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import * as criteria from '../src/checks/criteria/render.mjs';
 import * as security from '../src/checks/security/render.mjs';
 import * as rules from '../src/checks/rules/render.mjs';
+import * as quality from '../src/checks/quality/render.mjs';
+import * as duplication from '../src/checks/duplication/render.mjs';
+import * as tests from '../src/checks/tests/render.mjs';
 import { getCheck, listChecks, sortChecks, UnknownCheckError } from '../src/checks/registry.mjs';
 import {
   CRITERIA_WITH_GAPS,
@@ -21,9 +24,49 @@ const DIFF_CTX = {
 
 const BASE_CTX = { base: 'origin/develop', head: 'HEAD', repo: '.', taskId: '2803', diff: DIFF_CTX };
 
+const DUPLICATION_CTX = {
+  indexed: 42,
+  indexTruncated: false,
+  introduced: 1,
+  findings: [
+    {
+      symbol: {
+        name: 'CalculateTotal',
+        kind: 'method',
+        path: 'src/New.cs',
+        line: 10,
+        signature: 'public decimal CalculateTotal(Order o)',
+        body: 'public decimal CalculateTotal(Order o)\n{\n  return o.Lines.Sum();\n}',
+      },
+      matches: [
+        {
+          candidate: {
+            name: 'ComputeSum',
+            kind: 'method',
+            path: 'src/Old.cs',
+            line: 5,
+            signature: 'public decimal ComputeSum(Invoice i)',
+            body: 'public decimal ComputeSum(Invoice i)\n{\n  return i.Items.Sum();\n}',
+          },
+          score: 0.82,
+          signals: { name: 0.66, signature: 1, body: 0.79 },
+          introducedHere: false,
+        },
+      ],
+    },
+  ],
+};
+
 describe('registry', () => {
   it('exposes the implemented checks in display order', () => {
-    expect(listChecks()).toEqual(['criteria', 'security', 'rules']);
+    expect(listChecks()).toEqual([
+      'criteria',
+      'security',
+      'rules',
+      'quality',
+      'duplication',
+      'tests',
+    ]);
   });
 
   it('rejects an unknown check by name', () => {
@@ -92,11 +135,10 @@ describe('criteria render', () => {
   it('builds a prompt from the task description', () => {
     const built = criteria.buildPrompt({
       ...BASE_CTX,
-      task: { description: htmlToText(TASK_HTML_WITH_CRITERIA) },
+      task: { title: 'Filtrado', description: htmlToText(TASK_HTML_WITH_CRITERIA) },
     });
 
-    expect(built.system).toContain('task DESCRIPTION');
-    expect(built.prompt).toContain('Task description');
+    expect(built.prompt).toContain('Input mode: explicit');
     expect(built.prompt).toContain('Output format');
   });
 
@@ -106,9 +148,90 @@ describe('criteria render', () => {
       task: { criteriaBlock: '- primero\n- segundo\n' },
     });
 
-    expect(built.system).toContain('a list of acceptance criteria');
+    expect(built.prompt).toContain('Input mode: explicit');
     expect(built.prompt).toContain('C1. primero');
     expect(built.prompt).toContain('C2. segundo');
+  });
+
+  // A task whose description is just its title states no criteria; the check
+  // has to infer them, and say so.
+  it('switches to inferred mode when the task states no criteria', () => {
+    const task = { title: 'Servicio de correo dedicado', description: 'Servicio de correo dedicado' };
+
+    expect(criteria.criteriaModeFor(task)).toBe('inferred');
+    expect(criteria.buildPrompt({ ...BASE_CTX, task }).prompt).toContain('Input mode: inferred');
+  });
+
+  it('builds a prompt from the title alone', () => {
+    const built = criteria.buildPrompt({ ...BASE_CTX, task: { title: 'Solo título' } });
+
+    expect(built.prompt).toContain('Solo título');
+    expect(built.prompt).toContain('Input mode: inferred');
+  });
+
+  it('sends the PR title and body as untrusted evidence', () => {
+    const built = criteria.buildPrompt({
+      ...BASE_CTX,
+      task: { title: 'x', description: htmlToText(TASK_HTML_WITH_CRITERIA) },
+      prTitle: 'fix: corrige el filtro',
+      prBody: 'Cambié el validador de rango.',
+    });
+
+    expect(built.prompt).toContain('UNTRUSTED INPUT');
+    expect(built.prompt).toContain('Cambié el validador de rango.');
+  });
+
+  it('offers the parent task as context and never as a requirement', () => {
+    const built = criteria.buildPrompt({
+      ...BASE_CTX,
+      task: {
+        title: 'Subtarea',
+        description: 'algo',
+        parent: { id: '3906', title: 'HU-21', description: 'criterios del padre' },
+      },
+    });
+
+    expect(built.prompt).toContain('Context tasks (background only)');
+    expect(built.prompt).toContain('Never judge a criterion of theirs');
+    expect(built.prompt).toContain('HU-21');
+  });
+
+  // A diff belonging to different work is a misdirected check, not a failed
+  // one: listing criteria it was never meant to satisfy buries the real problem.
+  it('reports non-correspondence instead of listing unmet criteria', () => {
+    const out = criteria.render(
+      {
+        correspondence: 'mismatch',
+        correspondenceReason: 'El diff toca CI y la tarea pide un endpoint.',
+        criteria: [],
+      },
+      { ...BASE_CTX, task: { title: 'x', description: 'y' }, taskRef: { source: 'branch' } },
+    );
+
+    expect(out.overall).toBe('FAIL');
+    expect(out.counts.mismatch).toBe(1);
+    expect(out.rows[0].verdict).toBe('NO CORRESPONDE');
+    expect(out.details[0].body).toContain('referencia el id de la');
+  });
+
+  it('does not block on incomplete inferred criteria', () => {
+    const out = criteria.render(parsed, {
+      ...BASE_CTX,
+      task: { title: 'Servicio de correo', description: 'Servicio de correo' },
+    });
+
+    expect(out.overall).toBe('PASS');
+    expect(out.details.length).toBeGreaterThan(0);
+    expect(out.emptyMessage).toContain('no enumera criterios');
+  });
+
+  it('still blocks on incomplete explicit criteria', () => {
+    const out = criteria.render(parsed, {
+      ...BASE_CTX,
+      task: { title: 'x', description: htmlToText(TASK_HTML_WITH_CRITERIA) },
+    });
+
+    expect(out.overall).toBe('FAIL');
   });
 
   it('refuses to build a prompt with neither source', () => {
@@ -196,6 +319,12 @@ describe('prompt hygiene', () => {
       ...BASE_CTX,
       task: { criteriaBlock: '- uno\n' },
       rules: { empty: false, text: '### a.md\nregla' },
+      coverage: {
+        orphans: [
+          { name: 'Nuevo', kind: 'method', path: 'src/a.cs', line: 3, signature: 'public void Nuevo()' },
+        ],
+      },
+      duplication: DUPLICATION_CTX,
     };
 
     const built = check.buildPrompt(ctx);
@@ -203,5 +332,212 @@ describe('prompt hygiene', () => {
     expect(built.prompt).toContain('Return ONLY a single JSON object');
     expect(built.prompt).toContain('Do not quote the diff back');
     expect(built.system.length).toBeGreaterThan(80);
+  });
+});
+
+describe('quality render', () => {
+  const withHigh = {
+    overall: 'FAIL',
+    summary: 'Un método hace tres cosas.',
+    findings: [
+      {
+        severity: 'high',
+        issue: 'Reintento no idempotente',
+        location: 'src/Pagos.cs:88',
+        recommendation: 'Usa una clave de idempotencia por operación.',
+      },
+      {
+        severity: 'low',
+        issue: 'Número mágico sin nombre',
+        location: 'src/Pagos.cs:12',
+        recommendation: 'Extrae 3600 a una constante.',
+      },
+    ],
+  };
+
+  it('puts one row per finding and prose for all of them', () => {
+    const out = quality.render(withHigh);
+
+    expect(out.rows).toHaveLength(2);
+    expect(out.rows[0]).toMatchObject({ id: 'Q1', verdict: 'ALTA' });
+    expect(out.details).toHaveLength(2);
+  });
+
+  // Blocking on every naming preference from day one is how a gate teaches
+  // people to ignore it, so only high severity turns it red.
+  it('blocks only on high severity', () => {
+    expect(quality.render(withHigh).overall).toBe('FAIL');
+
+    const lowOnly = { overall: 'PASS', findings: [withHigh.findings[1]] };
+    expect(quality.render(lowOnly).overall).toBe('PASS');
+  });
+
+  it('accepts an empty result as a normal outcome', () => {
+    const out = quality.render({ overall: 'PASS', findings: [] });
+
+    expect(out.overall).toBe('PASS');
+    expect(out.emptyMessage).toContain('Sin observaciones');
+  });
+
+  it('rejects a verdict without a findings array', () => {
+    expect(quality.render({ overall: 'PASS' })).toBeNull();
+  });
+
+  it('declares that vulnerabilities belong to the security check', () => {
+    const built = quality.buildPrompt({ ...BASE_CTX, prBody: 'x' });
+
+    expect(built.system).toMatch(/do not report vulnerabilities/i);
+    expect(built.system).toMatch(/idempotency/i);
+    expect(built.prompt).toContain('UNTRUSTED INPUT');
+  });
+
+  it('skips a diff that touches no code', () => {
+    expect(quality.meta.requiresCode).toBe(true);
+  });
+});
+
+describe('duplication render', () => {
+  const parsed = {
+    overall: 'FAIL',
+    summary: 'Un método replica uno existente.',
+    findings: [
+      {
+        symbol: 'CalculateTotal',
+        location: 'src/New.cs:10',
+        existing: 'ComputeSum',
+        existingLocation: 'src/Old.cs:5',
+        verdict: 'duplicate',
+        recommendation: 'Usa ComputeSum y borra CalculateTotal: sólo cambia el nombre del agregado.',
+      },
+      {
+        symbol: 'Slugify',
+        location: 'src/Text.cs:3',
+        existing: 'Normalize',
+        existingLocation: 'src/Str.cs:8',
+        verdict: 'similar',
+        recommendation: 'Comparten forma pero no dominio; unirlos acoplaría dos cosas que cambian aparte.',
+      },
+    ],
+  };
+
+  it('names both ends of every pair in the table', () => {
+    const out = duplication.render(parsed);
+
+    expect(out.rows).toHaveLength(2);
+    expect(out.rows[0].verdict).toBe('DUPLICA');
+    expect(out.rows[0].evidence).toContain('src/New.cs:10');
+    expect(out.rows[0].evidence).toContain('src/Old.cs:5');
+  });
+
+  // A pair the model cleared is information the developer has no action for,
+  // and printing it invites arguing with the ones it did flag.
+  it('writes prose only for actual duplicates', () => {
+    const out = duplication.render(parsed);
+
+    expect(out.details).toHaveLength(1);
+    expect(out.details[0].body).toContain('borra CalculateTotal');
+  });
+
+  it('passes when nothing is a duplicate', () => {
+    const out = duplication.render({ overall: 'PASS', findings: [parsed.findings[1]] });
+
+    expect(out.overall).toBe('PASS');
+    expect(out.counts.duplicates).toBe(0);
+  });
+
+  it('refuses to build a prompt with no candidate pairs', () => {
+    expect(() =>
+      duplication.buildPrompt({ ...BASE_CTX, duplication: { findings: [] } }),
+    ).toThrow();
+  });
+
+  // The existing half of a pair is by definition NOT in the diff, so the prompt
+  // has to carry both bodies or the model cannot answer the question at all.
+  it('carries both bodies and both locations', () => {
+    const built = duplication.buildPrompt({ ...BASE_CTX, duplication: DUPLICATION_CTX });
+
+    expect(built.prompt).toContain('src/New.cs:10');
+    expect(built.prompt).toContain('src/Old.cs:5');
+    expect(built.prompt).toContain('o.Lines.Sum()');
+    expect(built.prompt).toContain('i.Items.Sum()');
+  });
+
+  it('says when both halves come from this same pull request', () => {
+    const built = duplication.buildPrompt({
+      ...BASE_CTX,
+      duplication: {
+        ...DUPLICATION_CTX,
+        findings: [
+          {
+            ...DUPLICATION_CTX.findings[0],
+            matches: [{ ...DUPLICATION_CTX.findings[0].matches[0], introducedHere: true }],
+          },
+        ],
+      },
+    });
+
+    expect(built.prompt).toContain('THIS pull request');
+  });
+});
+
+describe('tests render', () => {
+  const parsed = {
+    overall: 'FAIL',
+    summary: 'Un servicio sin cobertura.',
+    symbols: [
+      {
+        symbol: 'EvaluateAsync',
+        location: 'src/Svc.cs:12',
+        verdict: 'needs_test',
+        suggestion: 'Cubre el caso de vacante sin requisitos, que hoy devuelve 0 sin explicarlo.',
+      },
+      {
+        symbol: 'ScoreDto',
+        location: 'src/ScoreDto.cs:1',
+        verdict: 'not_needed',
+        suggestion: 'Es un contenedor de datos sin lógica.',
+      },
+    ],
+  };
+
+  it('puts every candidate in the table', () => {
+    const out = tests.render(parsed);
+
+    expect(out.rows).toHaveLength(2);
+    expect(out.rows[0].verdict).toBe('SIN TEST');
+    expect(out.rows[1].verdict).toBe('NO APLICA');
+  });
+
+  // Explaining why a symbol does NOT need a test is noise the developer has no
+  // action for, so only the ones that need one get prose.
+  it('writes prose only for the symbols that need a test', () => {
+    const out = tests.render(parsed);
+
+    expect(out.details).toHaveLength(1);
+    expect(out.details[0].body).toContain('vacante sin requisitos');
+  });
+
+  it('passes when nothing needs a test', () => {
+    const out = tests.render({ overall: 'PASS', symbols: [parsed.symbols[1]] });
+
+    expect(out.overall).toBe('PASS');
+  });
+
+  it('refuses to build a prompt with no candidates', () => {
+    expect(() => tests.buildPrompt({ ...BASE_CTX, coverage: { orphans: [] } })).toThrow();
+  });
+
+  it('lists the candidates it was given', () => {
+    const built = tests.buildPrompt({
+      ...BASE_CTX,
+      coverage: {
+        orphans: [
+          { name: 'EvaluateAsync', kind: 'method', path: 'src/Svc.cs', line: 12, signature: 'public async Task Evaluate()' },
+        ],
+      },
+    });
+
+    expect(built.prompt).toContain('EvaluateAsync');
+    expect(built.prompt).toContain('src/Svc.cs:12');
   });
 });
