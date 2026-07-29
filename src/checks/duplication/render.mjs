@@ -11,7 +11,7 @@
 
 import promptTemplate from './prompt.md?raw';
 import config from './config.json';
-import { cell, header, label, outputFormat, text, untrustedBlock } from '../shared.mjs';
+import { cell, codeFence, header, inlineValue, label, outputFormat, text, untrustedBlock } from '../shared.mjs';
 
 export const meta = {
   name: 'duplication',
@@ -41,6 +41,14 @@ function bodyOf(symbol) {
   return body.length > MAX_BODY_CHARS ? `${body.slice(0, MAX_BODY_CHARS)}\n// [...truncated]` : body;
 }
 
+/** `name (kind) — path:line`, each part flattened to one line. */
+function describe(symbol) {
+  return (
+    `${inlineValue(symbol.name, 120)} (${inlineValue(symbol.kind, 30)}) — ` +
+    `${inlineValue(symbol.path, 200)}:${Number(symbol.line) || 0}`
+  );
+}
+
 /** The shortlist, each pair with both bodies side by side. */
 function pairsSection(findings) {
   const blocks = [];
@@ -55,21 +63,21 @@ function pairsSection(findings) {
         ? 'Both symbols are introduced by THIS pull request.'
         : 'The second symbol already existed in the repository.';
 
+      // Names, kinds and paths come out of the reviewed tree, so they are
+      // author-written too: a newline in one would add lines to this enumeration
+      // that read as the tool's own. The bodies get a fence long enough that no
+      // backtick run inside them can close it.
       blocks.push(
         [
           `### Pair ${index} — similarity ${match.score.toFixed(2)} ` +
             `(name ${match.signals.name.toFixed(2)}, signature ${match.signals.signature.toFixed(2)}, body ${match.signals.body.toFixed(2)})`,
           origin,
           '',
-          `New: ${finding.symbol.name} (${finding.symbol.kind}) — ${finding.symbol.path}:${finding.symbol.line}`,
-          '```',
-          bodyOf(finding.symbol),
-          '```',
+          `New: ${describe(finding.symbol)}`,
+          codeFence(bodyOf(finding.symbol)),
           '',
-          `Existing: ${match.candidate.name} (${match.candidate.kind}) — ${match.candidate.path}:${match.candidate.line}`,
-          '```',
-          bodyOf(match.candidate),
-          '```',
+          `Existing: ${describe(match.candidate)}`,
+          codeFence(bodyOf(match.candidate)),
         ].join('\n'),
       );
     }

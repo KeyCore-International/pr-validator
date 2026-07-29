@@ -9,8 +9,8 @@
 // than what it is called, and what it is called matters more than the types it
 // happens to take.
 
-import { nameSimilarity } from './name.mjs';
-import { signatureSimilarity } from './signature.mjs';
+import { nameSimilarity, tokenize } from './name.mjs';
+import { normalizeSignature, signatureSimilarity } from './signature.mjs';
 import { bodySimilarity, normalizeBody, shingles } from './body.mjs';
 
 export const DEFAULT_WEIGHTS = { name: 0.3, signature: 0.2, body: 0.5 };
@@ -36,6 +36,62 @@ function shinglesFor(symbol) {
   const computed = shingles(normalizeBody(symbol.body ?? ''));
   shingleCache.set(symbol, computed);
   return computed;
+}
+
+// Name tokens and signature shape, like bodies, computed once per symbol instead
+// of once per pair. `findDuplicates` walks the whole index for every symbol the
+// pull request introduces, so anything recomputed inside that loop is paid a
+// number of times equal to the product of the two.
+const tokenCache = new WeakMap();
+const signatureCache = new WeakMap();
+
+function tokensFor(symbol) {
+  const cached = tokenCache.get(symbol);
+  if (cached) return cached;
+  const computed = new Set(tokenize(symbol.name ?? ''));
+  tokenCache.set(symbol, computed);
+  return computed;
+}
+
+function signatureFor(symbol) {
+  const cached = signatureCache.get(symbol);
+  if (cached) return cached;
+  const computed = normalizeSignature(symbol.signature ?? '');
+  signatureCache.set(symbol, computed);
+  return computed;
+}
+
+/**
+ * Can this pair be ruled out before it is scored?
+ *
+ * Not a heuristic — arithmetic. Jaccard is bounded above by the ratio of the two
+ * shingle-set sizes, so when the sets are lopsided the body signal has a ceiling.
+ * With no shared name token the name signal is 0, and with a differing arity the
+ * signature signal is 0 too, which leaves `0.5 * body` as the whole weighted
+ * score. Clearing 0.55 would need a body over 1, and clearing the body-only floor
+ * needs 0.8 — so if the size ratio cannot reach 0.8 either, no scoring can save
+ * this pair. Skipping it changes no result and removes most of the work.
+ */
+function cannotClear(a, b, threshold, weights = DEFAULT_WEIGHTS) {
+  if (tokensShare(tokensFor(a), tokensFor(b))) return false;
+
+  const left = signatureFor(a);
+  const right = signatureFor(b);
+  const arityCouldMatch =
+    left.arity !== null && right.arity !== null && left.arity === right.arity;
+  if (arityCouldMatch) return false;
+
+  const sizeA = shinglesFor(a).size;
+  const sizeB = shinglesFor(b).size;
+  if (!sizeA || !sizeB) return true;
+
+  const ceiling = Math.min(sizeA, sizeB) / Math.max(sizeA, sizeB);
+  return ceiling < STRONG_BODY && weights.body * ceiling < threshold;
+}
+
+function tokensShare(left, right) {
+  for (const token of left) if (right.has(token)) return true;
+  return false;
 }
 
 function jaccard(left, right) {
@@ -90,14 +146,20 @@ export function findDuplicates({
   threshold = DEFAULT_THRESHOLD,
   maxCandidates = MAX_CANDIDATES,
   weights = DEFAULT_WEIGHTS,
+  deadline = null,
 } = {}) {
   const out = [];
 
   for (const symbol of symbols) {
+    // Checked per symbol rather than per pair: reading the clock once per
+    // candidate would itself become part of the cost being bounded.
+    if (deadline !== null && Date.now() >= deadline) break;
+
     const matches = [];
 
     for (const candidate of index) {
       if (isSameSymbol(symbol, candidate)) continue;
+      if (cannotClear(symbol, candidate, threshold, weights)) continue;
 
       const signals = scorePair(symbol, candidate, weights);
       if (signals.score < threshold) continue;

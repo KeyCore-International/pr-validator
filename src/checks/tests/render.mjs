@@ -10,7 +10,7 @@
 
 import promptTemplate from './prompt.md?raw';
 import config from './config.json';
-import { cell, header, label, outputFormat, text, untrustedBlock } from '../shared.mjs';
+import { cell, header, inlineValue, label, outputFormat, text, untrustedBlock } from '../shared.mjs';
 
 export const meta = {
   name: 'tests',
@@ -28,10 +28,19 @@ const INSTRUCTION =
   'One entry per candidate symbol given below, keeping its name and location. Set overall "FAIL" ' +
   'if any symbol is "needs_test", else "PASS".';
 
-/** The candidates, with just enough of each to judge it. */
+/**
+ * The candidates, with just enough of each to judge it.
+ *
+ * `signature` is the added diff line verbatim, so it is author-written: left
+ * unflattened, a newline in one turned a single bullet into extra lines the model
+ * reads as this enumeration's own entries.
+ */
 function candidateSection(orphans) {
   const lines = orphans.map(
-    (symbol) => `- ${symbol.name} (${symbol.kind}) — ${symbol.path}:${symbol.line}\n  ${symbol.signature}`,
+    (symbol) =>
+      `- ${inlineValue(symbol.name, 120)} (${inlineValue(symbol.kind, 30)}) — ` +
+      `${inlineValue(symbol.path, 200)}:${Number(symbol.line) || 0}\n` +
+      `  ${inlineValue(symbol.signature, 200)}`,
   );
 
   return `## Untested public symbols introduced by this pull request\n${lines.join('\n')}`;

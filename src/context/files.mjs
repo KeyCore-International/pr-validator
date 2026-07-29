@@ -7,6 +7,59 @@
 // The classification reads the diff STAT rather than the diff body, because the
 // body is subject to a truncation budget: whether a pull request touches code
 // at all must not depend on how much of it fit in the prompt.
+//
+// This module also owns the guard every context applies before reading a file
+// off disk — see `isRegularFileWithin`.
+
+import { lstatSync, realpathSync } from 'node:fs';
+import { isAbsolute, relative, sep } from 'node:path';
+
+/**
+ * Is `path` a regular file that really lives inside `root`?
+ *
+ * Every file this validator reads off disk comes from a tree the pull request
+ * can rewrite, and what it reads ends up in a prompt sent to an external
+ * gateway. A rule file replaced by a symlink to `.git/config` would publish the
+ * checkout credential; one pointing outside the checkout would publish whatever
+ * the runner can read.
+ *
+ * Two conditions, and both are load-bearing:
+ *
+ *   - `lstat` — never `stat`, which follows the link and reports the target —
+ *     must report a REGULAR file, so a symlink is refused whatever it points
+ *     at. Refusing only the links that escape the repository is not enough:
+ *     `.git/config` is inside it.
+ *   - the real path must stay inside the real `root`, which is what catches a
+ *     symlinked DIRECTORY whose entries then look local.
+ *
+ * Never throws. A missing, unreadable, dangling or looping path is `false`:
+ * callers already treat "cannot read this" as "not part of the corpus", and an
+ * exception raised here would surface as a tool error instead.
+ *
+ * @param {string} path
+ * @param {string} root
+ * @returns {boolean}
+ */
+export function isRegularFileWithin(path, root) {
+  try {
+    if (!lstatSync(path).isFile()) return false;
+
+    // Both sides resolved: a checkout that itself sits under a symlinked
+    // directory must not read as an escape from its own root.
+    const relativePath = relative(realpathSync(root), realpathSync(path));
+
+    // Component-wise. A `startsWith(root)` test would accept `/srv/repo-secrets`
+    // for a root of `/srv/repo`.
+    return (
+      relativePath !== '' &&
+      !isAbsolute(relativePath) &&
+      relativePath !== '..' &&
+      !relativePath.startsWith(`..${sep}`)
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Extensions that are not code.

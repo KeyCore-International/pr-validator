@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { buildDiff, DiffError, truncationNote } from '../src/context/diff.mjs';
+import { buildDiff, DiffError, isTooLargeError, truncationNote } from '../src/context/diff.mjs';
+import { isContentFailure } from '../src/run-check.mjs';
 import { bigFile, makeRepo } from './fixtures/repo.mjs';
 
 describe('buildDiff', () => {
@@ -93,5 +94,51 @@ describe('buildDiff truncation', () => {
     expect(note).toContain('La revisión es parcial');
     expect(note).toContain(String(ctx.totalChars));
     expect(note).toMatch(/\d+ de \d+ archivos/);
+  });
+});
+
+// "A third party is down" and "this pull request could not be read" are different
+// claims, and only the first is safe to answer with a green non-blocking warning.
+// A diff too large to buffer is a property of the branch: the `maxChars` budget
+// cannot prevent it, because it applies to the returned string long after the
+// child process has already been killed.
+describe('failures caused by the change under review', () => {
+  it('marks a diff that overruns the buffer as a content failure', () => {
+    const err = new DiffError('x', { contentFailure: true });
+
+    expect(isContentFailure(err)).toBe(true);
+  });
+
+  it('leaves an ordinary git failure as an infrastructure failure', () => {
+    expect(isContentFailure(new DiffError('git diff failed: no such ref'))).toBe(false);
+  });
+
+  it.each([
+    ['a gateway outage', new Error('fetch failed')],
+    ['nothing at all', null],
+  ])('does not blame the author for %s', (_label, err) => {
+    expect(isContentFailure(err)).toBe(false);
+  });
+
+  // Belt and braces for a pattern the branch wrote that does not compile. The
+  // glob reader no longer lets one escape, but a new caller might.
+  it('treats an uncompilable pattern as a content failure', () => {
+    expect(isContentFailure(new SyntaxError('Invalid regular expression'))).toBe(true);
+  });
+});
+
+describe('isTooLargeError', () => {
+  it.each([
+    ['the ENOBUFS code', { code: 'ENOBUFS', message: 'spawn error' }],
+    ['the maxBuffer message', { message: 'stdout maxBuffer length exceeded' }],
+  ])('recognises %s', (_label, err) => {
+    expect(isTooLargeError(err)).toBe(true);
+  });
+
+  it.each([
+    ['a missing ref', { message: "fatal: bad revision 'origin/nope'" }],
+    ['nothing', null],
+  ])('does not mistake %s for it', (_label, err) => {
+    expect(isTooLargeError(err)).toBe(false);
   });
 });

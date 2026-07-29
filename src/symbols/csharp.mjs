@@ -6,6 +6,8 @@
 // missed symbol costs one observation, a hallucinated one costs the reader's
 // trust in every other observation.
 
+import { MAX_NAME_CHARS } from './limits.mjs';
+
 /** Type declarations: class, record, interface, struct, enum. */
 const TYPE =
   /^\s*(?:\[[^\]]*\]\s*)*(public|internal|protected)\s+(?:(?:abstract|sealed|static|partial|readonly|ref)\s+)*(class|record|interface|struct|enum)\s+([A-Za-z_]\w*)/;
@@ -36,7 +38,7 @@ export function extract(lines) {
     const type = text.match(TYPE);
     if (type) {
       out.push({
-        name: type[3],
+        name: type[3].slice(0, MAX_NAME_CHARS),
         kind: KIND_FOR[type[2]] ?? 'class',
         line,
         signature: text.trim().slice(0, 200),
@@ -51,7 +53,7 @@ export function extract(lines) {
     // fine, a constructor is not the unit a test targets.
     if (method && method[4]) {
       out.push({
-        name: method[3],
+        name: method[3].slice(0, MAX_NAME_CHARS),
         kind: 'method',
         line,
         signature: text.trim().slice(0, 200),

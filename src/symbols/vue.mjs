@@ -12,6 +12,7 @@
 // future bug twice.
 
 import { extract as extractScript } from './typescript.mjs';
+import { MAX_NAME_CHARS } from './limits.mjs';
 
 /** `components/vacancy/VacancyCard.vue` -> `VacancyCard` */
 export function componentNameFromPath(path) {
@@ -34,7 +35,9 @@ export function componentNameFromPath(path) {
  * @returns {Array<{name: string, kind: string, line: number, signature: string, exported: boolean}>}
  */
 export function extract(lines, path = '') {
-  const name = componentNameFromPath(path);
+  // The path is read from a diff header, so its length is the pull request's to
+  // choose. Capping the name here bounds the signature built from it as well.
+  const name = componentNameFromPath(path).slice(0, MAX_NAME_CHARS);
   const out = [];
 
   // A component counts as touched when the diff adds anything to its file —

@@ -16,7 +16,7 @@ import { crossWithTests } from './context/coverage.mjs';
 import { buildDuplicationContext } from './context/duplication.mjs';
 import { symbolsFromDiff } from './symbols/index.mjs';
 import { loadRules, rulesSourceNotes, rulesTruncationNote } from './context/rules.mjs';
-import { resolveConfig } from './context/config.mjs';
+import { gateOverrideNotes, resolveConfig } from './context/config.mjs';
 import { loadRepoConfig, perCheckSettings } from './context/repo-config.mjs';
 import { resolveTaskRef } from './context/task-ref.mjs';
 import { fetchTask } from './context/tasks-api.mjs';
@@ -28,6 +28,7 @@ import {
   makeVerdict,
   skippedVerdict,
   toolErrorVerdict,
+  unreviewableVerdict,
 } from './report/verdict.mjs';
 import { noRulesVerdict } from './checks/rules/render.mjs';
 
@@ -115,7 +116,15 @@ async function buildContext({ check, inputs, config, log }) {
     if (ref.mode === 'task' && ref.subjectId) {
       try {
         ctx.task = await fetchTask(ref.subjectId);
-        if (ref.criteriaBlock) ctx.task.criteriaBlock = ref.criteriaBlock;
+        // The fence is deliberately *not* carried over here. It is the fallback
+        // for an unreachable task manager, and on the success path it would let
+        // the author of the change write the criteria they are judged against —
+        // while the comment still carries the real task's id, so a reviewer
+        // reads it as the real criteria having been checked.
+        if (ref.criteriaBlock) {
+          ctx.criteriaBlockIgnored = true;
+          log(`ignoring the PR body criteria fence: task #${ref.subjectId} was fetched`);
+        }
       } catch (err) {
         log(`task fetch failed for #${ref.subjectId}: ${err.message}`);
         // The PR-body block is the documented fallback for an unreachable
@@ -145,14 +154,8 @@ async function buildContext({ check, inputs, config, log }) {
 
 /** Cases where a check legitimately produces a verdict without calling a model. */
 function shortCircuit({ name, check, inputs, ctx }) {
-  if (inputs.isFork) {
-    return skippedVerdict({
-      check: name,
-      title: check.meta.title,
-      reason:
-        'PR desde un fork: GitHub no entrega secrets a workflows de forks, así que los checks de IA no pueden ejecutarse. No bloquea.',
-    });
-  }
+  // The fork case is handled by `runCheck` before the context is built — see the
+  // comment there. It is deliberately not repeated here.
 
   // A change that only edits prose has nothing for a code reviewer to say. The
   // skip is declared rather than silent: the developer sees why the check did
@@ -203,8 +206,25 @@ function shortCircuit({ name, check, inputs, ctx }) {
     });
   }
 
-  if (name === 'rules' && ctx.rules?.empty) {
+  // Nothing to judge against. `empty` means the repository wrote nothing down;
+  // an empty `text` also covers a corpus that ended up with no section for a
+  // reason — every file refused by the read guard, or dropped by scope or
+  // budget. `noRulesVerdict` is what says which of those happened, so a corpus
+  // that vanished behind symlinks never reads as "sin reglas declaradas".
+  if (name === 'rules' && ctx.rules && !ctx.rules.text) {
     const base = noRulesVerdict(ctx.rules);
+    // A corpus the budget threw away is not an absence of rules, and skipping it
+    // green would publish a reason that is untrue while the rule files sit in the
+    // tree. The budget is settable from the branch under review, which is what
+    // made the green skip buyable.
+    if (base.overall === 'FAIL') {
+      return unreviewableVerdict({
+        check: name,
+        title: check.meta.title,
+        error: base.emptyMessage,
+        blocking: ctx.config?.blocking !== false,
+      });
+    }
     return skippedVerdict({
       check: name,
       title: check.meta.title,
@@ -245,9 +265,39 @@ function shortCircuit({ name, check, inputs, ctx }) {
   return null;
 }
 
+/**
+ * Was this failure caused by the change under review, rather than by the world?
+ *
+ * Deliberately a whitelist. Guessing the other way — treating anything unknown
+ * as the author's fault — would block merges on genuine outages, which is the
+ * failure mode this project cares most about avoiding.
+ */
+export function isContentFailure(err) {
+  if (!err) return false;
+  // Set by whoever threw, which is the only party that knows.
+  if (err.contentFailure === true) return true;
+  // A pattern the branch wrote that does not compile. Belt and braces: the glob
+  // reader no longer lets this escape, but a new caller might.
+  if (err instanceof SyntaxError) return true;
+  return false;
+}
+
 /** Notes that belong on the verdict regardless of outcome (AC-6, AC-22, AC-23). */
-function contextNotes(ctx, repoConfig) {
+function contextNotes(ctx, repoConfig, check = '') {
   const notes = [...(repoConfig?.notes ?? [])];
+  // What the branch asked for and did not get. Refusing in silence would leave a
+  // repository debugging a setting that looked accepted.
+  notes.push(...gateOverrideNotes(repoConfig?.config ?? {}, check));
+  // The author wrote acceptance criteria in the PR body and the real task was
+  // reachable, so the fence was ignored. Saying so is the difference between a
+  // verdict a reviewer can trust and one they cannot audit.
+  if (ctx.criteriaBlockIgnored) {
+    notes.push(
+      'El cuerpo del PR incluye un bloque `criteria`, pero se obtuvo la tarea del gestor: ' +
+        'se evaluaron los criterios de la tarea, no los del cuerpo. El bloque solo se usa ' +
+        'cuando la tarea no se puede obtener.',
+    );
+  }
   if (ctx.diff) {
     const note = truncationNote(ctx.diff);
     if (note) notes.push(note);
@@ -256,6 +306,20 @@ function contextNotes(ctx, repoConfig) {
     const note = rulesTruncationNote(ctx.rules);
     if (note) notes.push(note);
     notes.push(...rulesSourceNotes(ctx.rules));
+  }
+  // Every ceiling this check can hit is declared. A comparison that stopped early
+  // and said nothing would read as "nothing here duplicates anything".
+  if (ctx.duplication?.indexTruncated) {
+    notes.push(
+      `El índice de símbolos del repositorio se truncó: se comparó contra ${ctx.duplication.indexed} ` +
+        'símbolos, no contra todos. La revisión de duplicación es parcial.',
+    );
+  }
+  if (ctx.duplication?.comparisonTruncated) {
+    notes.push(
+      'La comparación de duplicación agotó su presupuesto de tiempo y se detuvo antes de ' +
+        'revisar todos los símbolos que introduce el PR. La revisión es parcial.',
+    );
   }
   return notes;
 }
@@ -290,17 +354,44 @@ export async function runCheck({ inputs, env = process.env, log = console.error 
     inputs: inputs.model ? { model: inputs.model } : {},
   });
 
+  // Before the context is built, not after. A fork pull request skips every AI
+  // check in green, so building the context first meant an outside contributor
+  // still paid for the repository-wide symbol index and the scoring pass — the
+  // expensive half of a run whose result was discarded.
+  if (inputs.isFork) {
+    return skippedVerdict({
+      check: name,
+      title: check.meta.title,
+      reason:
+        'PR desde un fork: GitHub no entrega secrets a workflows de forks, así que los checks de IA no pueden ejecutarse. No bloquea.',
+    });
+  }
+
   let ctx;
   try {
     ctx = await buildContext({ check, inputs, config, log });
   } catch (err) {
+    // Not every failure here is somebody else's outage. A glob the branch wrote,
+    // a diff too large to buffer, a file that cannot be read — those are
+    // properties of the change under review, and answering "no bloquea" to them
+    // means the gate waved through a pull request it never looked at.
+    if (isContentFailure(err)) {
+      log(`::error::${name}: no se pudo construir el contexto: ${err.message}`);
+      return unreviewableVerdict({
+        check: name,
+        title: check.meta.title,
+        error: err.message,
+        blocking: config.blocking,
+        meta: { model: config.model },
+      });
+    }
     return toolErrorVerdict({ check: name, title: check.meta.title, error: err.message });
   }
 
   const early = shortCircuit({ name, check, inputs, ctx });
   if (early) return early;
 
-  const notes = contextNotes(ctx, repoConfig);
+  const notes = contextNotes(ctx, repoConfig, name);
 
   // From here on the context exists, so any tool error still reports what was
   // loaded and what had to be cut. Truncation is information the developer

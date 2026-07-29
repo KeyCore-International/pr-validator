@@ -11,6 +11,7 @@ import {
   makeVerdict,
   skippedVerdict,
   toolErrorVerdict,
+  unreviewableVerdict,
 } from '../src/report/verdict.mjs';
 import { collectVerdicts } from '../src/report.mjs';
 import { runCheck } from '../src/run-check.mjs';
@@ -250,5 +251,72 @@ describe('runCheck short circuits', () => {
 
     expect(verdict.status).toBe(STATUS.SKIPPED);
     expect(verdict.notes[0]).toContain('Sin reglas declaradas');
+  });
+});
+
+describe('a corpus the budget threw away is not an absence of rules', () => {
+  let repo;
+
+  beforeAll(() => {
+    // A budget of 1 no longer reaches here — it is clamped to its floor — so the
+    // case left is the accidental one: a corpus that genuinely does not fit the
+    // budget in force, which drops every file and used to report the repository
+    // as having declared no rules at all.
+    repo = makeRepo({
+      featureFiles: {
+        'src/a.cs': 'public class A { }\n',
+        'CLAUDE.md': `# Convenciones\n${'Nada de console.log en producción. '.repeat(400)}\n`,
+        '.pr-validator.json': JSON.stringify({ checks: { rules: { maxRulesChars: 4000 } } }),
+      },
+    });
+  });
+
+  afterAll(() => repo.cleanup());
+
+  it('refuses to skip green, and does not claim the repository declared nothing', async () => {
+    const verdict = await runCheck({
+      inputs: {
+        check: 'rules',
+        base: 'base',
+        head: 'feature',
+        repo: repo.dir,
+        outFile: 'unused.json',
+        headRef: 'feature/1-x',
+        prTitle: '',
+        prBody: '',
+        isFork: false,
+        model: '',
+        configPath: '.pr-validator.json',
+      },
+      env: {},
+      log: () => {},
+    });
+
+    expect(verdict.status).not.toBe(STATUS.SKIPPED);
+    expect(verdict.notes.join(' ')).not.toContain('Sin reglas declaradas');
+    expect(isBlockingFailure(verdict)).toBe(true);
+  });
+});
+
+describe('unreviewableVerdict', () => {
+  // "A third party is down" and "this pull request could not be read" are
+  // different claims, and only the first is safe to wave through.
+  it('fails and blocks, unlike a tool error', () => {
+    const verdict = unreviewableVerdict({ check: 'rules', title: 'Reglas', error: 'glob roto' });
+
+    expect(verdict.status).toBe(STATUS.FAIL);
+    expect(isBlockingFailure(verdict)).toBe(true);
+    expect(verdict.notes[0]).toContain('glob roto');
+  });
+
+  it('stays advisory for a check the validator ships as advisory', () => {
+    const verdict = unreviewableVerdict({
+      check: 'rules',
+      title: 'Reglas',
+      error: 'x',
+      blocking: false,
+    });
+
+    expect(isBlockingFailure(verdict)).toBe(false);
   });
 });

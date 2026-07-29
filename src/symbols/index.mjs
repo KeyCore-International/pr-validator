@@ -42,9 +42,23 @@ export function addedLinesByFile(diffText) {
 
   let path = null;
   let lineNumber = 0;
+  let inHunk = false;
 
   for (const raw of String(diffText || '').split('\n')) {
-    const fileHeader = raw.match(/^\+\+\+ b\/(.+)$/);
+    // A new file's diff begins. Everything about the previous one is stale,
+    // including whether we were reading its hunks.
+    if (raw.startsWith('diff --git ')) {
+      path = null;
+      inHunk = false;
+      continue;
+    }
+
+    // A `+++ b/…` line is only a file header before the first hunk. Inside a
+    // hunk the same shape is an *added line* whose content happens to be
+    // `++ b/…`, which the author writes. Trusting it there let a pull request
+    // point the parser at dev/null and drop every symbol the file introduced,
+    // green-skipping the blocking checks that read them.
+    const fileHeader = inHunk ? null : raw.match(/^\+\+\+ b\/(.+)$/);
     if (fileHeader) {
       path = fileHeader[1] === 'dev/null' ? null : fileHeader[1];
       continue;
@@ -53,6 +67,7 @@ export function addedLinesByFile(diffText) {
     const hunk = raw.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
     if (hunk) {
       lineNumber = Number(hunk[1]);
+      inHunk = true;
       continue;
     }
 

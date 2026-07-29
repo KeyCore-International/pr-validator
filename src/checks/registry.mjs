@@ -51,6 +51,25 @@ export function getCheck(name) {
   return mod;
 }
 
+/**
+ * Checks the validator ships as blocking, which a repository may not remove from
+ * a run.
+ *
+ * The run list can come from `.pr-validator.json`, and that file is read from the
+ * checkout of the pull request's head — so without a floor the author of a change
+ * decides which checks are allowed to judge it, and the consolidated comment
+ * cannot even disclose the ones that went missing: its order is built from the
+ * resolved matrix, so a check that never ran has no row to be absent from.
+ *
+ * Every check ships blocking today, so this floor is the whole set and nothing is
+ * removable. Degrading one to advisory makes it removable again *and* silently
+ * undisclosable — so a degradation has to come with the disclosure fix, not just
+ * a flag flip in its `config.json`.
+ */
+export function mandatoryChecks() {
+  return listChecks().filter((name) => REGISTRY[name]?.config?.blocking === true);
+}
+
 /** Sort check names into display order, keeping unknown names at the end. */
 export function sortChecks(names) {
   return [...names].sort((a, b) => {

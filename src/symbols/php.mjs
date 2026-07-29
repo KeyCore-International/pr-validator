@@ -7,6 +7,8 @@
 // absence of a modifier means public — the opposite of C#, and the easiest
 // thing to get wrong here.
 
+import { MAX_NAME_CHARS } from './limits.mjs';
+
 /** `class Foo`, `final class Foo`, `abstract class Foo`, `interface`, `trait`, `enum`. */
 const TYPE =
   /^\s*(?:(?:final|abstract|readonly)\s+)*(class|interface|trait|enum)\s+([A-Za-z_]\w*)/;
@@ -31,7 +33,7 @@ export function extract(lines) {
     const type = text.match(TYPE);
     if (type) {
       out.push({
-        name: type[2],
+        name: type[2].slice(0, MAX_NAME_CHARS),
         kind: KIND_FOR[type[1]] ?? 'class',
         line,
         signature: text.trim().slice(0, 200),
@@ -48,7 +50,7 @@ export function extract(lines) {
     if (visibility === 'private') continue;
 
     out.push({
-      name: method[2],
+      name: method[2].slice(0, MAX_NAME_CHARS),
       kind: 'method',
       line,
       signature: text.trim().slice(0, 200),

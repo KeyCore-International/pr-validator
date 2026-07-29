@@ -9,7 +9,12 @@ import {
   rulesSourceNotes,
   rulesTruncationNote,
 } from '../src/context/rules.mjs';
-import { resolveConfig, VALIDATOR_DEFAULTS } from '../src/context/config.mjs';
+import {
+  BOUNDS,
+  gateOverrideNotes,
+  resolveConfig,
+  VALIDATOR_DEFAULTS,
+} from '../src/context/config.mjs';
 
 const CORPUS = join(import.meta.dirname, 'fixtures', 'rules-corpus');
 
@@ -145,6 +150,25 @@ describe('matchesAny', () => {
   ])('%s vs %s -> %s', (glob, path, expected) => {
     expect(matchesAny([glob], [path])).toBe(expected);
   });
+
+  // `globs: a{b` used to emit an unterminated group, and the `RegExp` throw
+  // travelled all the way to the runner's catch-all, where a four-line file
+  // turned a blocking check into a green "no bloquea". Keeping the rule is the
+  // safe direction: reading a convention that did not apply costs budget,
+  // dropping one that did applies no rule at all.
+  it.each(['a{b', '**/*.{ts', '[', 'a{b,c', '{{{', '**/*.{ts,{tsx'])(
+    'never throws on the malformed glob %s',
+    (glob) => {
+      expect(() => matchesAny([glob], ['src/a.cs'])).not.toThrow();
+    },
+  );
+
+  // The unclosed brace is read as if it had been closed, which is the reading the
+  // author almost certainly meant.
+  it('closes an unbalanced brace instead of giving up', () => {
+    expect(matchesAny(['src/*.{ts'], ['src/a.ts'])).toBe(true);
+    expect(matchesAny(['**/*.{ts,tsx}'], ['src/a.tsx'])).toBe(true);
+  });
 });
 
 describe('relevance pre-filter', () => {
@@ -250,12 +274,88 @@ describe('resolveConfig', () => {
   it('lets the repository override the check config', () => {
     const config = resolveConfig({
       check: 'rules',
-      checkConfig: { model: 'check/model', blocking: true },
-      repoConfig: { checks: { rules: { model: 'repo/model', blocking: false } } },
+      checkConfig: { model: 'check/model' },
+      repoConfig: { checks: { rules: { model: 'repo/model' } } },
     });
 
     expect(config.model).toBe('repo/model');
-    expect(config.blocking).toBe(false);
+  });
+
+  // `.pr-validator.json` is read from the head checkout, so this is the author of
+  // the change deciding whether the check that judges it can fail at all.
+  it('refuses a head-side blocking:false', () => {
+    const config = resolveConfig({
+      check: 'rules',
+      checkConfig: { blocking: true },
+      repoConfig: { checks: { rules: { blocking: false } } },
+    });
+
+    expect(config.blocking).toBe(true);
+  });
+
+  it('still lets a repository make a non-blocking check blocking', () => {
+    const config = resolveConfig({
+      check: 'rules',
+      checkConfig: { blocking: false },
+      repoConfig: { checks: { rules: { blocking: true } } },
+    });
+
+    expect(config.blocking).toBe(true);
+  });
+
+  // A budget is a gate control: one character of diff leaves the model nothing
+  // to object to, and it answers PASS without printing a failure anywhere.
+  it.each([
+    ['maxDiffChars', 1],
+    ['maxRulesChars', 1],
+    ['attempts', 0],
+  ])('clamps a head-side %s of %s to its floor', (key, value) => {
+    const config = resolveConfig({ check: 'rules', repoConfig: { checks: { rules: { [key]: value } } } });
+
+    expect(config[key]).toBe(BOUNDS[key].min);
+  });
+
+  it('clamps an inflated budget to its ceiling', () => {
+    const config = resolveConfig({ check: 'rules', repoConfig: { maxDiffChars: 99999999 } });
+
+    expect(config.maxDiffChars).toBe(BOUNDS.maxDiffChars.max);
+  });
+
+  it('keeps a budget the repository is entitled to set', () => {
+    const config = resolveConfig({ check: 'rules', repoConfig: { maxDiffChars: 20000 } });
+
+    expect(config.maxDiffChars).toBe(20000);
+  });
+
+  it('falls back to the default when a budget is not a number', () => {
+    const config = resolveConfig({ check: 'rules', repoConfig: { maxDiffChars: 'mucho' } });
+
+    expect(config.maxDiffChars).toBe(VALIDATOR_DEFAULTS.maxDiffChars);
+  });
+});
+
+describe('gateOverrideNotes', () => {
+  // Refusing in silence is its own defect: the repository that asked deserves to
+  // read why it did not take effect, and a reviewer deserves to see it tried.
+  it('names a refused blocking:false', () => {
+    const notes = gateOverrideNotes({ checks: { rules: { blocking: false } } }, 'rules');
+
+    expect(notes[0]).toContain('`blocking: false`');
+    expect(notes[0]).toContain('rama base');
+  });
+
+  it('names a budget that was clamped', () => {
+    expect(gateOverrideNotes({ checks: { rules: { maxDiffChars: 1 } } }, 'rules')[0]).toContain(
+      'maxDiffChars: 1',
+    );
+  });
+
+  it('says nothing about a budget inside its bounds', () => {
+    expect(gateOverrideNotes({ maxDiffChars: 20000 }, 'rules')).toEqual([]);
+  });
+
+  it('says nothing when the repository configured nothing', () => {
+    expect(gateOverrideNotes({}, 'rules')).toEqual([]);
   });
 
   it('lets a repo-wide model apply to a check with no explicit model', () => {

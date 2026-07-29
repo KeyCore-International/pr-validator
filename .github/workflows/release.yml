@@ -5,12 +5,24 @@ name: Release
 # CI.
 #
 # Guards before the tag moves:
+#   - the tagged commit is an ancestor of the default branch
 #   - the full test suite passes
 #   - the committed bundles match src/
 #   - nothing non-neutral is in the tree
+#   - the workflow's own action pins match the major being published
 #
 # A tag that fails any of these is left where it is, pointing at the previous
 # good release.
+#
+# The ancestry check is first, and it is the only guard that does not read from
+# the tagged tree. Every other one does, and for a `push: tags` event GitHub runs
+# the workflow definition AT THE PUSHED REF — so a tag pushed from a branch that
+# was never reviewed brings its own copy of this file, and could simply delete the
+# steps below. Requiring the commit to be on the default branch is what puts the
+# pull request review back in front of a release.
+#
+# Tag protection for `v*` in the repository settings is the other half, and it is
+# a server-side setting this file cannot assert.
 
 on:
   push:
@@ -28,13 +40,31 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # The contents-write token is not left in `.git/config` for the whole
+          # job. Everything between here and the push runs repository JavaScript —
+          # `npm ci`, `npm test`, the build — and none of it needs credentials.
+          persist-credentials: false
+
+      # Before anything else, and before any repository code has run.
+      - name: Tagged commit is on the default branch
+        shell: bash
+        run: |
+          git fetch --no-tags origin "+refs/heads/${{ github.event.repository.default_branch }}:refs/remotes/origin/default"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/default; then
+            echo "::error::$GITHUB_REF_NAME apunta a $GITHUB_SHA, que no es ancestro de ${{ github.event.repository.default_branch }}."
+            echo "::error::Un release solo se publica desde un commit que pasó por pull request."
+            exit 1
+          fi
+          echo "$GITHUB_SHA está en ${{ github.event.repository.default_branch }}."
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: npm
 
-      - run: npm ci --no-audit --no-fund
+      # `--ignore-scripts`: nothing in this dependency tree needs a lifecycle
+      # script to install, and the job that runs next holds the release token.
+      - run: npm ci --no-audit --no-fund --ignore-scripts
 
       - name: Test
         run: npm test
@@ -62,13 +92,18 @@ jobs:
           fi
           echo "Versión $pkg."
 
+      # The one step that needs the token, so it carries it explicitly rather than
+      # relying on a credential the checkout left behind.
       - name: Move the major tag
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           major="${GITHUB_REF_NAME%%.*}"
           echo "Moviendo $major -> $GITHUB_REF_NAME"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -f "$major" "$GITHUB_REF_NAME"
-          git push origin "$major" --force
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "refs/tags/$major" --force
           echo "Los repositorios que fijan @$major reciben esta versión en su próximo PR."

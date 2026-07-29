@@ -54,6 +54,38 @@ function statusLabel(verdict) {
   }
 }
 
+/**
+ * Longest prose block this comment will emit for any single field.
+ *
+ * `summary` is model-supplied and was the only field with no bound at all: the
+ * 500-character limit existed as a sentence *inside the prompt*, an instruction
+ * to the model that no code enforced.
+ */
+const MAX_PROSE = 700;
+
+/**
+ * Make a block of prose safe to publish under the validator's own identity.
+ *
+ * Everything here is either model-supplied or copied from the pull request, in a
+ * comment posted by the bot and read by reviewers as the gate's own word. The
+ * escaping is structural, not cosmetic: without it a summary could close the
+ * collapsed block it sits in, open an HTML comment that swallows the real rows,
+ * or repeat the marker and confuse the next run's upsert.
+ */
+function prose(value, max = MAX_PROSE) {
+  return (
+    String(value ?? '')
+      // Control characters, keeping tab and newline: those are legitimate prose.
+      .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
+      // Any HTML that can hide or restructure what follows. Rendered inert by
+      // breaking the tag, so the text stays legible and the structure cannot move.
+      .replace(/<(\/?)(details|summary|!--|script|style|iframe)/gi, '&lt;$1$2')
+      .replace(/-->/g, '--&gt;')
+      .trim()
+      .slice(0, max)
+  );
+}
+
 function rowsTable(rows) {
   if (!rows.length) return null;
   const lines = ['| # | Detalle | Veredicto | Evidencia |', '|---|---------|-----------|-----------|'];
@@ -66,21 +98,34 @@ function rowsTable(rows) {
 function checkSection(verdict) {
   const parts = [];
 
-  if (verdict.summary) parts.push(verdict.summary, '');
+  // Every field below is model-supplied or copied from the pull request, and this
+  // comment carries the validator's identity to reviewers. `cell()` and `text()`
+  // bound the fields on the way in but escape no structure, and `summary` was
+  // bounded by nothing at all.
+  const summary = prose(verdict.summary);
+  if (summary) parts.push(summary, '');
 
   const table = rowsTable(verdict.rows);
   if (table) parts.push(table, '');
-  else if (verdict.emptyMessage) parts.push(verdict.emptyMessage, '');
+  else if (verdict.emptyMessage) parts.push(prose(verdict.emptyMessage), '');
 
   if (verdict.details.length) {
     parts.push('#### Qué corregir', '');
     for (const detail of verdict.details) {
-      parts.push(`**${detail.heading}**`, '', detail.body, '');
+      parts.push(`**${prose(detail.heading, 200)}**`, '', prose(detail.body), '');
     }
   }
 
   if (verdict.notes.length) {
-    for (const note of verdict.notes) parts.push(`> ${note}`, '');
+    // One `>` per line, or a note containing a newline would leave the blockquote
+    // and read as the comment's own prose.
+    for (const note of verdict.notes) {
+      const quoted = prose(note)
+        .split('\n')
+        .map((line) => `> ${line}`)
+        .join('\n');
+      parts.push(quoted, '');
+    }
   }
 
   if (verdict.meta?.model) {
@@ -176,6 +221,45 @@ async function gh(path, { token, method = 'GET', body, apiUrl, fetchImpl = fetch
 }
 
 /**
+ * The login the token posts as, or null when it cannot be resolved.
+ *
+ * `GITHUB_TOKEN` in Actions authenticates as an app installation, which `/user`
+ * rejects; the login of the comments it creates is `github-actions[bot]`. Both
+ * paths are tried, and neither being available is not an error — it only means
+ * no existing comment can be claimed as ours.
+ */
+async function ownIdentity({ token, apiUrl, fetchImpl }) {
+  try {
+    const me = await gh('/user', { token, apiUrl, fetchImpl });
+    if (me?.login) return me.login;
+  } catch {
+    // An installation token cannot read /user. Fall through to the known login.
+  }
+  return 'github-actions[bot]';
+}
+
+/**
+ * Every comment on the issue, following pagination.
+ *
+ * A single page of 100 was a silent cap: past it the gate stopped finding its own
+ * comment and posted a new one on every run.
+ */
+async function allComments({ base, token, apiUrl, fetchImpl, maxPages = 10 }) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const batch = await gh(`${base}/comments?per_page=100&page=${page}`, {
+      token,
+      apiUrl,
+      fetchImpl,
+    });
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    out.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return out;
+}
+
+/**
  * Create the comment, or update the existing one carrying the marker.
  *
  * @returns {Promise<{action: 'created'|'updated', id: number}>}
@@ -190,8 +274,26 @@ export async function upsertComment({
   fetchImpl = fetch,
 }) {
   const base = `/repos/${owner}/${repo}/issues/${issueNumber}`;
-  const comments = await gh(`${base}/comments?per_page=100`, { token, apiUrl, fetchImpl });
-  const existing = comments.find((c) => typeof c.body === 'string' && c.body.includes(MARKER));
+
+  // Whose comment are we allowed to overwrite? The marker alone is not an answer:
+  // it is a public constant in a public repository, inlined verbatim in the
+  // committed bundle, so the pull request author can post a comment carrying it.
+  // Comments come back oldest first, so theirs won permanently — the gate then
+  // spent every run updating a comment its author could edit afterwards, and no
+  // genuine report was ever created.
+  const self = await ownIdentity({ token, apiUrl, fetchImpl });
+  const comments = await allComments({ base, token, apiUrl, fetchImpl });
+
+  const existing = comments.find(
+    (c) =>
+      typeof c.body === 'string' &&
+      c.body.includes(MARKER) &&
+      // No identity resolved means no comment is claimed as ours, so a fresh one
+      // is created. Failing towards a duplicate comment beats overwriting a
+      // stranger's, and beats leaving a forged one standing as the only report.
+      self != null &&
+      c.user?.login === self,
+  );
 
   if (existing) {
     await gh(`/repos/${owner}/${repo}/issues/comments/${existing.id}`, {
