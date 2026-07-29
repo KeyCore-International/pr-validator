@@ -34,7 +34,7 @@ jobs:
       # ...los pasos de build y test propios de tu stack
 
   validate:
-    uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v3
+    uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v4
     with:
       base: develop
     secrets:
@@ -65,19 +65,36 @@ Opcional, en la raíz del repositorio consumidor. Permite ajustar el gate sin to
 ```json
 {
   "model": "proveedor/modelo",
-  "checks": ["criteria", "security", "rules", "quality", "tests"],
   "checksConfig": {
     "duplication": { "model": "proveedor/modelo-mas-capaz", "threshold": 0.7 },
-    "quality": { "blocking": false }
+    "quality": { "maxDiffChars": 20000 }
   }
 }
 ```
 
 Precedencia, de menor a mayor: **defaults del validador < `config.json` del check < este archivo < inputs del workflow**.
 
-Claves por check: `model`, `blocking`, `attempts`, `maxDiffChars`, `maxRulesChars`, `failOn`, y `threshold` / `maxCandidates` para `duplication`.
+Claves por check: `model`, `attempts`, `maxDiffChars`, `maxRulesChars`, `failOn`, `blocking`, y `threshold` / `maxCandidates` para `duplication`.
 
 Si sólo vas a configurar checks y no a elegir cuáles corren, puedes usar `"checks"` como objeto en vez de `"checksConfig"`.
+
+#### Lo que este archivo no puede hacer
+
+Se lee del checkout del **head del PR**, así que lo escribe quien abre el pull
+request. Por eso puede **apretar** el gate y nunca aflojarlo:
+
+- `blocking: true` sobre un check informativo se acepta. `blocking: false` sobre
+  uno bloqueante **no**.
+- Los presupuestos numéricos se acotan entre un piso y un techo. `maxDiffChars: 1`
+  no es una configuración, es un modo de dejar al modelo sin nada que leer.
+- Una lista `checks` puede **añadir** checks, no quitar los bloqueantes.
+
+Lo que se rechaza se nombra en el comentario del PR: una configuración ignorada en
+silencio es un repositorio depurando un ajuste que parecía aceptado.
+
+Para aflojar el gate de verdad —bajar un check a informativo, subir un
+presupuesto— usa el `checks` input del workflow, que vive en la rama base, o
+mergea el `.pr-validator.json` a la rama base primero.
 
 **Un archivo mal formado no bloquea nada**: se reporta como advertencia y el gate sigue con los valores por defecto. Una clave que el validador no reconoce se nombra en el comentario, para que un `blokcing: false` no pase por configurado durante meses.
 
@@ -126,7 +143,7 @@ Cuando el diff no se corresponde con la tarea referenciada, el check lo dice con
 
 ## Versionado
 
-Tags `vX.Y.Z` inmutables y un tag móvil `vX` que siempre apunta al último release de ese major. Fijar `@v3` recibe correcciones y mejoras automáticamente; fijar `@v3.0.0` congela la versión.
+Tags `vX.Y.Z` inmutables y un tag móvil `vX` que siempre apunta al último release de ese major. Fijar `@v4` recibe correcciones y mejoras automáticamente; fijar `@v4.0.0` congela la versión.
 
 Un cambio incompatible siempre implica un major nuevo.
 

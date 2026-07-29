@@ -83,7 +83,7 @@ jobs:
       # list that lives in two places disagrees with itself the first time
       # somebody adds a check.
       - id: matrix
-        uses: KeyCore-International/pr-validator/actions/resolve-checks@v3
+        uses: KeyCore-International/pr-validator/actions/resolve-checks@v4
         with:
           checks: ${{ inputs.checks }}
           config-path: ${{ inputs.config-path }}
@@ -131,7 +131,7 @@ jobs:
       # in the logs to say so. The pin must move with every major.
       - name: Run ${{ matrix.check }}
         id: run
-        uses: KeyCore-International/pr-validator/actions/run-check@v3
+        uses: KeyCore-International/pr-validator/actions/run-check@v4
         with:
           check: ${{ matrix.check }}
           base: origin/${{ inputs.base }}
@@ -231,7 +231,7 @@ jobs:
           done
 
       - name: Publish consolidated comment
-        uses: KeyCore-International/pr-validator/actions/report@v3
+        uses: KeyCore-International/pr-validator/actions/report@v4
         with:
           verdicts-dir: verdicts
           # The RESOLVED list, not the raw input: the input may be empty, and
