@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { extractCriteriaBlock, resolveTaskRef } from '../src/context/task-ref.mjs';
+import {
+  extractCriteriaBlock,
+  MAX_CONTEXT_TASKS,
+  resolveTaskRef,
+} from '../src/context/task-ref.mjs';
 import { fetchTask, htmlToText, TasksApiError } from '../src/context/tasks-api.mjs';
 import {
   makeTasksApiFetch,
@@ -9,46 +13,89 @@ import {
 } from './fixtures/tasks.mjs';
 
 describe('resolveTaskRef', () => {
-  it('reads the id from a feature branch', () => {
-    const ref = resolveTaskRef({ headRef: 'feature/2803-request-variants' });
-
-    expect(ref).toMatchObject({ mode: 'task', taskId: '2803', source: 'branch' });
+  it.each([
+    ['feature/2803-request-variants', '2803'],
+    ['fix/3002-error-texto', '3002'],
+    ['hotfix/91-urgent', '91'],
+    ['3002-slug', '3002'],
+    ['team/anthony/4100-algo', '4100'],
+  ])('reads the id from %s regardless of prefix', (headRef, expected) => {
+    expect(resolveTaskRef({ headRef })).toMatchObject({
+      mode: 'task',
+      subjectId: expected,
+      source: 'branch',
+    });
   });
 
   it.each([
-    'chore/pr-validation',
-    'hotfix/urgent',
-    'release/1.4.0',
-    'dependabot/npm_and_yarn/foo',
-    'renovate/bar',
-    'develop',
-    'master',
-    'main',
-    'qa',
-  ])('treats %s as exempt', (headRef) => {
-    expect(resolveTaskRef({ headRef }).mode).toBe('exempt');
+    ['fix: corrige el buscador (#3002)', '3002'],
+    ['feat: algo #3002', '3002'],
+    ['[3002] ajusta el filtro', '3002'],
+  ])('reads the id from the PR title: %s', (prTitle, expected) => {
+    expect(resolveTaskRef({ headRef: 'pepito', prTitle })).toMatchObject({
+      mode: 'task',
+      subjectId: expected,
+      source: 'title',
+    });
   });
 
-  it('fails a branch that is neither task-shaped nor exempt', () => {
-    expect(resolveTaskRef({ headRef: 'mejoras-portal' }).mode).toBe('invalid');
+  // The branch is the primary source: it is the one place the id appears
+  // without anybody having to remember to type it.
+  it('prefers the branch over the title', () => {
+    const ref = resolveTaskRef({ headRef: 'fix/3002-x', prTitle: 'fix: algo (#9999)' });
+
+    expect(ref).toMatchObject({ subjectId: '3002', source: 'branch' });
+    expect(ref.contextIds).toContain('9999');
   });
+
+  it('carries the other referenced ids as context', () => {
+    const ref = resolveTaskRef({
+      headRef: 'pepito',
+      prBody: 'Corrección de la incidencia #3002 de la tarea #3001',
+    });
+
+    expect(ref).toMatchObject({ subjectId: '3002', source: 'body' });
+    expect(ref.contextIds).toEqual(['3001']);
+  });
+
+  // Positional on purpose: two runs over the same pull request have to pick the
+  // same subject, and "the first one" is the only rule that guarantees it.
+  it('takes the first id of a source as the subject and the rest as context', () => {
+    const ref = resolveTaskRef({ headRef: 'pepito', prTitle: 'fix: unifica #3002 y #3003' });
+
+    expect(ref.subjectId).toBe('3002');
+    expect(ref.contextIds).toEqual(['3003']);
+  });
+
+  it('bounds how many context tasks it will pull in', () => {
+    const ref = resolveTaskRef({
+      headRef: 'pepito',
+      prTitle: 'x #1 #2 #3 #4 #5 #6',
+    });
+
+    expect(ref.contextIds).toHaveLength(MAX_CONTEXT_TASKS);
+  });
+
+  // Nomenclature stopped being a gate: a branch with no id has nothing to
+  // validate against, which is not the same thing as a violation.
+  it.each(['pepito', 'mejoras-portal', 'develop', 'main', 'feature/no-id-here'])(
+    'reports no reference for %s instead of failing',
+    (headRef) => {
+      expect(resolveTaskRef({ headRef })).toMatchObject({ mode: 'none', subjectId: null });
+    },
+  );
 
   it('falls back to a criteria block in the PR body', () => {
     const ref = resolveTaskRef({ headRef: 'mejoras-portal', prBody: PR_BODY_WITH_CRITERIA });
 
-    expect(ref).toMatchObject({ mode: 'task', taskId: null, source: 'body' });
+    expect(ref).toMatchObject({ mode: 'task', subjectId: null, source: 'body' });
     expect(ref.criteriaBlock).toContain('fechaInicio');
   });
 
   it('prefers the branch id over the body block', () => {
     const ref = resolveTaskRef({ headRef: 'feature/77-x', prBody: PR_BODY_WITH_CRITERIA });
 
-    expect(ref.source).toBe('branch');
-    expect(ref.taskId).toBe('77');
-  });
-
-  it('does not treat a feature branch without a numeric id as a task', () => {
-    expect(resolveTaskRef({ headRef: 'feature/no-id-here' }).mode).toBe('invalid');
+    expect(ref).toMatchObject({ source: 'branch', subjectId: '77' });
   });
 });
 
@@ -131,9 +178,79 @@ describe('fetchTask', () => {
     await expect(fetchTask(999, { env, fetchImpl })).rejects.toThrow(/HTTP 404/);
   });
 
-  it('fails when the task has an empty description', async () => {
-    const fetchImpl = makeTasksApiFetch({ task: { title: 'x', description: '' } });
+  // Plenty of real tasks carry their whole intent in the title. Refusing them
+  // would deny those pull requests any criteria validation at all, so the
+  // check infers instead.
+  it('accepts a task whose description is empty', async () => {
+    const fetchImpl = makeTasksApiFetch({ task: { title: 'Servicio de correo dedicado' } });
 
-    await expect(fetchTask(1, { env, fetchImpl })).rejects.toThrow(/no description/);
+    const task = await fetchTask(1, { env, fetchImpl });
+
+    expect(task.title).toBe('Servicio de correo dedicado');
+    expect(task.description).toBe('');
+  });
+
+  it('reads the status and flags the terminal ones', async () => {
+    const fetchImpl = makeTasksApiFetch({
+      task: { title: 'x', description: 'y', taskStatus: { name: 'Enviado QA' } },
+    });
+
+    const task = await fetchTask(1, { env, fetchImpl });
+
+    expect(task.status).toBe('Enviado QA');
+    expect(task.isTerminal).toBe(true);
+  });
+
+  it('does not flag an open status as terminal', async () => {
+    const fetchImpl = makeTasksApiFetch({
+      task: { title: 'x', description: 'y', taskStatus: { name: 'En Progreso' } },
+    });
+
+    expect((await fetchTask(1, { env, fetchImpl })).isTerminal).toBe(false);
+  });
+
+  // The manager declaring "this is an incident" beats any heuristic over the
+  // status, so it is read directly rather than inferred.
+  it('reads the incident marker', async () => {
+    const fetchImpl = makeTasksApiFetch({
+      task: { title: 'x', description: 'y', incidentOrigin: 'PRODUCTION' },
+    });
+
+    const task = await fetchTask(1, { env, fetchImpl });
+
+    expect(task.isIncident).toBe(true);
+    expect(task.incidentOrigin).toBe('PRODUCTION');
+  });
+
+  it('flattens the embedded parent task', async () => {
+    const fetchImpl = makeTasksApiFetch({
+      task: {
+        title: 'Subtarea técnica',
+        description: 'y',
+        task: { id: 3906, title: 'HU-21', description: TASK_HTML_WITH_CRITERIA },
+        subTasks: [{ id: 1 }, { id: 2 }],
+      },
+    });
+
+    const task = await fetchTask(4084, { env, fetchImpl });
+
+    expect(task.parent).toMatchObject({ id: '3906', title: 'HU-21' });
+    expect(task.parent.description).toContain('- El endpoint acepta');
+    expect(task.subtaskCount).toBe(2);
+  });
+
+  // A deployment that exposes none of the optional fields keeps working with
+  // exactly the functionality it had before.
+  it('tolerates a response with none of the optional fields', async () => {
+    const fetchImpl = makeTasksApiFetch({ task: { title: 'x', description: 'y' } });
+
+    expect(await fetchTask(1, { env, fetchImpl })).toMatchObject({
+      status: null,
+      isTerminal: false,
+      isIncident: false,
+      incidentOrigin: null,
+      parent: null,
+      subtaskCount: 0,
+    });
   });
 });

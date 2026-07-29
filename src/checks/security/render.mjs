@@ -12,6 +12,9 @@ export const meta = {
   name: 'security',
   title: 'Seguridad del código',
   contextNeeds: ['diff'],
+  // Nothing to review in a change that only edits prose. Note that YAML, JSON
+  // and Dockerfiles DO count as code — see `src/context/files.mjs`.
+  requiresCode: true,
 };
 
 export { config };

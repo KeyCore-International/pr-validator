@@ -80,5 +80,15 @@ export function resolveConfig({ check, checkConfig = {}, repoConfig = {}, inputs
     // Severities that turn a finding into a failing check. Empty means the
     // check never fails on findings, only reports them.
     failOn: firstDefined(perCheckRepo.failOn, checkConfig.failOn, []),
+    // Knobs on `duplication`'s deterministic pre-filter. Deliberately without a
+    // validator-wide default: the number belongs to the check that uses it, and
+    // a repository drowning in candidates can move it without the validator
+    // pretending every check has a threshold.
+    threshold: asNumber(firstDefined(perCheckRepo.threshold, checkConfig.threshold)),
+    maxCandidates: asNumber(firstDefined(perCheckRepo.maxCandidates, checkConfig.maxCandidates)),
   };
+}
+
+function asNumber(value) {
+  return value === undefined ? undefined : Number(value);
 }

@@ -1,6 +1,6 @@
 {
   "name": "pr-validator",
-  "version": "2.0.2",
+  "version": "3.4.0",
   "private": true,
   "type": "module",
   "description": "Reusable GitHub Actions workflow that validates pull requests: acceptance criteria, security, project rules, quality, duplication and test coverage.",
@@ -12,6 +12,7 @@
     "build": "node scripts/build.mjs",
     "build:check": "node scripts/build.mjs --verify",
     "check:neutrality": "node scripts/neutrality.mjs",
+    "check:pins": "node scripts/check-pins.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -61,24 +61,85 @@ export function htmlToText(html) {
     .replace(/<\s*br\s*\/?\s*>/gi, '\n')
     .replace(/<[^>]+>/g, '')
     .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
     .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'")
+    // Accented entities are the norm in Spanish task descriptions, and leaving
+    // them encoded put "Criterios de aceptaci&oacute;n" in front of the model —
+    // which then failed to recognise its own heading. Numeric first, then the
+    // named ones, and `&amp;` last so a double-encoded entity resolves once.
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)))
+    .replace(/&([aeiouAEIOU])(acute|grave|circ|uml);/g, (_, letter, accent) => {
+      const marks = { acute: '́', grave: '̀', circ: '̂', uml: '̈' };
+      return `${letter}${marks[accent]}`.normalize('NFC');
+    })
+    .replace(/&ntilde;/g, 'ñ')
+    .replace(/&Ntilde;/g, 'Ñ')
+    .replace(/&ccedil;/g, 'ç')
+    .replace(/&Ccedil;/g, 'Ç')
+    .replace(/&amp;/gi, '&')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
 /**
- * Fetch one task's title and plain-text description.
+ * Status names that mean development already handed the task over. A pull
+ * request opened against a task sitting in one of these is usually a fix for
+ * something found afterwards, filed under an id of its own.
+ *
+ * Kept as a list rather than wired into the logic so a deployment that names
+ * its states differently only has to change this.
+ */
+export const TERMINAL_STATUS_NAMES = ['enviado qa', 'completadas', 'no aplica'];
+
+/** Whether a status name means the task is no longer open development work. */
+export function isTerminalStatus(name) {
+  if (!name) return false;
+  return TERMINAL_STATUS_NAMES.includes(String(name).trim().toLowerCase());
+}
+
+/**
+ * Shape one task from whatever the deployment returned. Every field beyond
+ * title and description is optional: a task manager that does not expose it
+ * keeps working with exactly the functionality it had before.
+ */
+function shapeTask(raw, id) {
+  const status = raw?.taskStatus?.name ?? raw?.status?.name ?? raw?.status ?? null;
+  const incidentOrigin = raw?.incidentOrigin ?? null;
+
+  return {
+    id: String(id ?? raw?.id ?? ''),
+    title: raw?.title ?? '',
+    description: htmlToText(raw?.description ?? ''),
+    status: typeof status === 'string' ? status : null,
+    isTerminal: isTerminalStatus(typeof status === 'string' ? status : null),
+    // The manager declaring "this is an incident" beats any heuristic we could
+    // run over the status, so it is read first and the status is the fallback.
+    isIncident: Boolean(incidentOrigin),
+    incidentOrigin: incidentOrigin ?? null,
+  };
+}
+
+/**
+ * Fetch one task, with whatever context the deployment exposes alongside it.
+ *
+ * The parent task arrives embedded in the same response, so a subtask whose
+ * acceptance criteria live on its parent costs no extra request.
  *
  * @param {string|number} id
  * @param {object} [opts]
  * @param {object} [opts.env=process.env]
  * @param {Function} [opts.fetchImpl=fetch]  Injection seam for tests.
- * @returns {Promise<{id: string, title: string, description: string}>}
+ * @returns {Promise<{
+ *   id: string, title: string, description: string,
+ *   status: string|null, isTerminal: boolean,
+ *   isIncident: boolean, incidentOrigin: string|null,
+ *   parent: {id: string, title: string, description: string}|null,
+ *   subtaskCount: number
+ * }>}
  * @throws {TasksApiError}
  */
 export async function fetchTask(id, { env = process.env, fetchImpl = fetch } = {}) {
@@ -96,8 +157,16 @@ export async function fetchTask(id, { env = process.env, fetchImpl = fetch } = {
 
   const json = await res.json();
   const task = json?.data ?? json;
-  const description = htmlToText(task?.description ?? '');
-  if (!description) throw new TasksApiError(`task ${id} has no description`);
 
-  return { id: String(id), title: task?.title ?? '', description };
+  // An empty description is no longer fatal. Plenty of real tasks carry their
+  // whole intent in the title, and the criteria check can infer from that —
+  // refusing here would deny those pull requests any validation at all.
+  const shaped = shapeTask(task, id);
+  const rawParent = task?.task ?? task?.parentTask ?? null;
+
+  return {
+    ...shaped,
+    parent: rawParent ? shapeTask(rawParent, rawParent?.id) : null,
+    subtaskCount: Array.isArray(task?.subTasks) ? task.subTasks.length : 0,
+  };
 }

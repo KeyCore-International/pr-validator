@@ -148,7 +148,10 @@ describe('runCheck short circuits', () => {
   let repo;
 
   beforeAll(() => {
-    repo = makeRepo({ featureFiles: { 'src/a.txt': 'changed\n' } });
+    // A code file on purpose: the checks that review code skip a diff made of
+    // prose alone, so a .txt fixture would short-circuit before reaching what
+    // these tests are about.
+    repo = makeRepo({ featureFiles: { 'src/a.cs': 'public class A { }\n' } });
   });
 
   afterAll(() => repo.cleanup());
@@ -182,26 +185,33 @@ describe('runCheck short circuits', () => {
     expect(isBlockingFailure(verdict)).toBe(false);
   });
 
-  it('fails the criteria check when no task can be identified', async () => {
+  // Naming stopped being a gate. A pull request with no task reference has
+  // nothing to validate against, which is not the same as a violation — and
+  // this used to be the only place the gate blocked over metadata instead of
+  // over code.
+  it.each(['mejoras-portal', 'chore/pr-validation', 'pepito', 'develop'])(
+    'skips the criteria check instead of failing it for %s',
+    async (headRef) => {
+      const verdict = await runCheck({
+        inputs: inputs({ check: 'criteria', headRef }),
+        env: {},
+        log: () => {},
+      });
+
+      expect(verdict.status).toBe(STATUS.SKIPPED);
+      expect(isBlockingFailure(verdict)).toBe(false);
+    },
+  );
+
+  it('tells the developer how to make the criteria check run', async () => {
     const verdict = await runCheck({
-      inputs: inputs({ check: 'criteria', headRef: 'mejoras-portal' }),
+      inputs: inputs({ check: 'criteria', headRef: 'pepito' }),
       env: {},
       log: () => {},
     });
 
-    expect(verdict.status).toBe(STATUS.FAIL);
-    expect(verdict.blocking).toBe(true);
-    expect(verdict.details[0].body).toContain('feature/<id>-<slug>');
-  });
-
-  it('skips the criteria check on an exempt branch', async () => {
-    const verdict = await runCheck({
-      inputs: inputs({ check: 'criteria', headRef: 'chore/pr-validation' }),
-      env: {},
-      log: () => {},
-    });
-
-    expect(verdict.status).toBe(STATUS.SKIPPED);
+    expect(verdict.notes[0]).toContain('<id>-slug');
+    expect(verdict.notes[0]).toContain('#<id>');
   });
 
   it('skips a check when the diff is empty', async () => {

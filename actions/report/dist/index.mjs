@@ -46,9 +46,10 @@ function statusLabel(verdict) {
     }
     case STATUS.FAIL: {
       const counts = verdict.meta?.counts;
+      const suffix = verdict.blocking ? "" : " \u2014 no bloquea";
+      if (counts?.mismatch) return `${ICON[STATUS.FAIL]} NO CORRESPONDE${suffix}`;
       const n = counts?.gaps ?? counts?.violations ?? counts?.blocking ?? counts?.total;
       const detail = n ? ` (${n})` : "";
-      const suffix = verdict.blocking ? "" : " \u2014 no bloquea";
       return `${ICON[STATUS.FAIL]} FAIL${detail}${suffix}`;
     }
     case STATUS.TOOL_ERROR:

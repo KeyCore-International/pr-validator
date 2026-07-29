@@ -34,9 +34,15 @@ function statusLabel(verdict) {
     }
     case STATUS.FAIL: {
       const counts = verdict.meta?.counts;
+      const suffix = verdict.blocking ? '' : ' — no bloquea';
+
+      // A diff that belongs to different work is not a failed check, it is a
+      // misdirected one. Labelling it FAIL sends the developer looking for
+      // criteria to satisfy when what they have to fix is the reference.
+      if (counts?.mismatch) return `${ICON[STATUS.FAIL]} NO CORRESPONDE${suffix}`;
+
       const n = counts?.gaps ?? counts?.violations ?? counts?.blocking ?? counts?.total;
       const detail = n ? ` (${n})` : '';
-      const suffix = verdict.blocking ? '' : ' — no bloquea';
       return `${ICON[STATUS.FAIL]} FAIL${detail}${suffix}`;
     }
     case STATUS.TOOL_ERROR:

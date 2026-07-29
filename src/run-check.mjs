@@ -11,8 +11,13 @@
 
 import { writeFileSync } from 'node:fs';
 import { buildDiff, ensureBaseRef, truncationNote } from './context/diff.mjs';
-import { loadRules, rulesTruncationNote } from './context/rules.mjs';
+import { classifyDiffFiles } from './context/files.mjs';
+import { crossWithTests } from './context/coverage.mjs';
+import { buildDuplicationContext } from './context/duplication.mjs';
+import { symbolsFromDiff } from './symbols/index.mjs';
+import { loadRules, rulesSourceNotes, rulesTruncationNote } from './context/rules.mjs';
 import { resolveConfig } from './context/config.mjs';
+import { loadRepoConfig, perCheckSettings } from './context/repo-config.mjs';
 import { resolveTaskRef } from './context/task-ref.mjs';
 import { fetchTask } from './context/tasks-api.mjs';
 import { getCheck, UnknownCheckError, listChecks } from './checks/registry.mjs';
@@ -39,6 +44,7 @@ export function readInputs(env = process.env) {
     prBody: env.PR_BODY || '',
     isFork: env.PR_IS_FORK === 'true',
     model: env.INPUT_MODEL || env.PR_VALIDATOR_MODEL || '',
+    configPath: env.INPUT_CONFIG_PATH || '.pr-validator.json',
   };
 }
 
@@ -51,6 +57,12 @@ async function buildContext({ check, inputs, config, log }) {
     repo: inputs.repo,
     taskId: null,
     config,
+    // What the developer says they did. Every check gets it, because judging a
+    // change without reading its author's account of it is judging half the
+    // conversation. It is untrusted input and each check renders it as such.
+    prTitle: inputs.prTitle,
+    prBody: inputs.prBody,
+    headRef: inputs.headRef,
   };
 
   if (needs.has('diff')) {
@@ -61,10 +73,34 @@ async function buildContext({ check, inputs, config, log }) {
       head: inputs.head,
       maxChars: config.maxDiffChars,
     });
+    ctx.files = classifyDiffFiles(ctx.diff);
   }
 
   if (needs.has('rules')) {
-    ctx.rules = loadRules({ repo: inputs.repo, maxChars: config.maxRulesChars });
+    ctx.rules = loadRules({
+      repo: inputs.repo,
+      maxChars: config.maxRulesChars,
+      // Rules that declare which files they govern are matched against what
+      // this pull request actually touches, so an out-of-scope convention never
+      // takes budget from one that applies.
+      touched: ctx.files?.files ?? null,
+    });
+  }
+
+  if (needs.has('coverage')) {
+    ctx.coverage = crossWithTests({
+      symbols: symbolsFromDiff(ctx.diff?.diff ?? ''),
+      repo: inputs.repo,
+    });
+  }
+
+  if (needs.has('duplication')) {
+    ctx.duplication = buildDuplicationContext({
+      diffText: ctx.diff?.diff ?? '',
+      repo: inputs.repo,
+      threshold: config.threshold,
+      maxCandidates: config.maxCandidates,
+    });
   }
 
   if (needs.has('task')) {
@@ -74,17 +110,30 @@ async function buildContext({ check, inputs, config, log }) {
       prBody: inputs.prBody,
     });
     ctx.taskRef = ref;
-    ctx.taskId = ref.taskId;
+    ctx.taskId = ref.subjectId;
 
-    if (ref.mode === 'task' && ref.taskId) {
+    if (ref.mode === 'task' && ref.subjectId) {
       try {
-        ctx.task = await fetchTask(ref.taskId);
+        ctx.task = await fetchTask(ref.subjectId);
+        if (ref.criteriaBlock) ctx.task.criteriaBlock = ref.criteriaBlock;
       } catch (err) {
-        log(`task fetch failed for #${ref.taskId}: ${err.message}`);
+        log(`task fetch failed for #${ref.subjectId}: ${err.message}`);
         // The PR-body block is the documented fallback for an unreachable
         // task manager.
         ctx.task = ref.criteriaBlock ? { criteriaBlock: ref.criteriaBlock } : null;
         ctx.taskFetchError = err.message;
+      }
+
+      // Context tasks are a nicety, never a requirement: one that fails to
+      // load costs the model some background and nothing else, so a failure
+      // here must not touch the verdict.
+      ctx.contextTasks = [];
+      for (const id of ref.contextIds) {
+        try {
+          ctx.contextTasks.push(await fetchTask(id));
+        } catch (err) {
+          log(`context task fetch failed for #${id}: ${err.message}`);
+        }
       }
     } else if (ref.criteriaBlock) {
       ctx.task = { criteriaBlock: ref.criteriaBlock };
@@ -105,6 +154,55 @@ function shortCircuit({ name, check, inputs, ctx }) {
     });
   }
 
+  // A change that only edits prose has nothing for a code reviewer to say. The
+  // skip is declared rather than silent: the developer sees why the check did
+  // not run, instead of wondering whether it was broken.
+  if (check.meta.requiresCode && ctx.files && !ctx.files.hasCode && !ctx.diff?.empty) {
+    return skippedVerdict({
+      check: name,
+      title: check.meta.title,
+      reason:
+        `El diff no toca archivos de código (${ctx.files.nonCode.length} archivo(s) de documentación o binarios). ` +
+        'No hay nada que revisar en este check.',
+    });
+  }
+
+  // A repository with no test suite does not fail coverage — there is nothing
+  // to cross against. And when every new symbol is already mentioned by a test,
+  // there is no question left for a model to answer.
+  if (ctx.coverage) {
+    if (!ctx.coverage.hasTestSuite) {
+      return skippedVerdict({
+        check: name,
+        title: check.meta.title,
+        reason:
+          'El repositorio no tiene archivos de test que cruzar. No hay cobertura que exigir ' +
+          'hasta que exista una suite.',
+      });
+    }
+
+    if (!ctx.coverage.orphans.length) {
+      return skippedVerdict({
+        check: name,
+        title: check.meta.title,
+        reason: `Los símbolos públicos que introduce el PR ya aparecen en la suite (${ctx.coverage.testFileCount} archivos de test).`,
+      });
+    }
+  }
+
+  // Nothing cleared the similarity threshold, which is the ordinary outcome.
+  // Skipping here is what keeps the check cheap: most pull requests never pay
+  // for a model call at all.
+  if (ctx.duplication && !ctx.duplication.findings.length) {
+    return skippedVerdict({
+      check: name,
+      title: check.meta.title,
+      reason: ctx.duplication.introduced
+        ? `Ninguno de los ${ctx.duplication.introduced} símbolos que introduce el PR se parece a los ${ctx.duplication.indexed} ya indexados.`
+        : 'El PR no introduce símbolos públicos comparables con el resto del repositorio.',
+    });
+  }
+
   if (name === 'rules' && ctx.rules?.empty) {
     const base = noRulesVerdict(ctx.rules);
     return skippedVerdict({
@@ -117,31 +215,18 @@ function shortCircuit({ name, check, inputs, ctx }) {
   if (check.meta.contextNeeds.includes('task')) {
     const mode = ctx.taskRef?.mode;
 
-    if (mode === 'exempt') {
+    // No reference is not a violation — it is a check with nothing to judge
+    // against. This is the only outcome for a pull request that carries no
+    // task, and it is green on purpose: the naming convention is a shortcut,
+    // not a gate.
+    if (mode === 'none') {
       return skippedVerdict({
         check: name,
         title: check.meta.title,
-        reason: `La rama \`${inputs.headRef}\` está exenta de la convención de tareas. No hay criterios que validar.`,
-      });
-    }
-
-    if (mode === 'invalid') {
-      return makeVerdict({
-        check: name,
-        title: check.meta.title,
-        status: STATUS.FAIL,
-        blocking: true,
-        summary: 'No se pudo identificar la tarea del PR.',
-        details: [
-          {
-            id: 'ref',
-            heading: 'Referencia de tarea ausente',
-            body:
-              `La rama \`${inputs.headRef}\` no sigue la convención \`feature/<id>-<slug>\` y el PR no aporta el id de la tarea. ` +
-              'Sin id no se pueden validar los criterios de aceptación. Renombra la rama o incluye el id de la tarea. ' +
-              'Prefijos exentos: `chore/`, `hotfix/`, `release/`.',
-          },
-        ],
+        reason:
+          `El PR no referencia ninguna tarea, ni en la rama \`${inputs.headRef}\`, ni en el título, ni en el cuerpo. ` +
+          'No hay criterios que validar. Para que este check evalúe, incluye el id de la tarea ' +
+          'en el nombre de la rama (`<id>-slug`) o en el título del PR (`#<id>`).',
       });
     }
 
@@ -161,8 +246,8 @@ function shortCircuit({ name, check, inputs, ctx }) {
 }
 
 /** Notes that belong on the verdict regardless of outcome (AC-6, AC-22, AC-23). */
-function contextNotes(ctx) {
-  const notes = [];
+function contextNotes(ctx, repoConfig) {
+  const notes = [...(repoConfig?.notes ?? [])];
   if (ctx.diff) {
     const note = truncationNote(ctx.diff);
     if (note) notes.push(note);
@@ -170,11 +255,7 @@ function contextNotes(ctx) {
   if (ctx.rules) {
     const note = rulesTruncationNote(ctx.rules);
     if (note) notes.push(note);
-    if (ctx.rules.sources.length) {
-      notes.push(
-        `Reglas cargadas (${ctx.rules.sources.length}): ${ctx.rules.sources.map((s) => s.path).join(', ')}.`,
-      );
-    }
+    notes.push(...rulesSourceNotes(ctx.rules));
   }
   return notes;
 }
@@ -197,9 +278,15 @@ export async function runCheck({ inputs, env = process.env, log = console.error 
     throw err;
   }
 
+  const repoConfig = loadRepoConfig({ repo: inputs.repo, configPath: inputs.configPath });
+
   const config = resolveConfig({
     check: name,
     checkConfig: check.config,
+    // `checks` doubles as the run list, so per-check settings may live under
+    // either key. Normalising here keeps `resolveConfig` unaware of the file's
+    // shape and its precedence rules untouched.
+    repoConfig: { ...repoConfig.config, checks: perCheckSettings(repoConfig.config) },
     inputs: inputs.model ? { model: inputs.model } : {},
   });
 
@@ -213,7 +300,7 @@ export async function runCheck({ inputs, env = process.env, log = console.error 
   const early = shortCircuit({ name, check, inputs, ctx });
   if (early) return early;
 
-  const notes = contextNotes(ctx);
+  const notes = contextNotes(ctx, repoConfig);
 
   // From here on the context exists, so any tool error still reports what was
   // loaded and what had to be cut. Truncation is information the developer

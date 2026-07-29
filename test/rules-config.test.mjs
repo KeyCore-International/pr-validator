@@ -1,9 +1,34 @@
-import { describe, expect, it } from 'vitest';
-import { join } from 'node:path';
-import { loadRules, rulesTruncationNote } from '../src/context/rules.mjs';
+import { afterEach, describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import {
+  declaredScope,
+  loadRules,
+  matchesAny,
+  rulesSourceNotes,
+  rulesTruncationNote,
+} from '../src/context/rules.mjs';
 import { resolveConfig, VALIDATOR_DEFAULTS } from '../src/context/config.mjs';
 
 const CORPUS = join(import.meta.dirname, 'fixtures', 'rules-corpus');
+
+let repoDir;
+afterEach(() => {
+  if (repoDir) rmSync(repoDir, { recursive: true, force: true });
+  repoDir = undefined;
+});
+
+/** A throwaway repository tree with the given files. */
+function makeTree(files) {
+  repoDir = mkdtempSync(join(tmpdir(), 'prv-rules-'));
+  for (const [path, content] of Object.entries(files)) {
+    const full = join(repoDir, path);
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, content, 'utf8');
+  }
+  return repoDir;
+}
 
 describe('loadRules', () => {
   it('loads every rule file when the budget allows', () => {
@@ -55,6 +80,148 @@ describe('loadRules', () => {
     const cut = loadRules({ rulesDir: CORPUS, maxChars: 700 });
 
     expect(cut.totalChars).toBe(full.totalChars);
+  });
+});
+
+describe('rule sources beyond .claude/rules', () => {
+  it('reads the conventions a repository actually wrote, wherever they live', () => {
+    const repo = makeTree({
+      '.claude/rules/naming.md': '# Naming\nPascalCase.\n',
+      '.cursor/rules/api.mdc': '# API\nUn controlador por recurso.\n',
+      'CLAUDE.md': '# Proyecto\nNada de console.log.\n',
+      'CONTRIBUTING.md': '# Contribuir\nCommits en inglés.\n',
+      '.github/copilot-instructions.md': '# Copilot\nUsa async/await.\n',
+    });
+
+    const paths = loadRules({ repo }).sources.map((s) => s.path);
+
+    expect(paths).toContain('naming.md');
+    expect(paths).toContain('api.mdc');
+    expect(paths).toContain('CLAUDE.md');
+    expect(paths).toContain('CONTRIBUTING.md');
+    expect(paths).toContain('.github/copilot-instructions.md');
+  });
+
+  // Order is the budget policy: a folder somebody created to hold rules says
+  // more than a root file that also explains how to run the tests.
+  it('loads dedicated rule folders before root files', () => {
+    const repo = makeTree({
+      '.claude/rules/naming.md': '# Naming\n',
+      'CONTRIBUTING.md': '# Contribuir\n',
+    });
+
+    const paths = loadRules({ repo }).sources.map((s) => s.path);
+
+    expect(paths.indexOf('naming.md')).toBeLessThan(paths.indexOf('CONTRIBUTING.md'));
+  });
+
+  it('is empty when a repository wrote nothing down', () => {
+    expect(loadRules({ repo: makeTree({ 'src/a.cs': 'class A {}\n' }) }).empty).toBe(true);
+  });
+});
+
+describe('declaredScope', () => {
+  it.each([
+    ['---\nglobs: **/*.ts\n---\n# Regla', ['**/*.ts']],
+    ['---\nglobs: ["src/**/*.vue", "src/**/*.ts"]\n---\n', ['src/**/*.vue', 'src/**/*.ts']],
+    ['---\nappliesTo: **/*.cs\n---\n', ['**/*.cs']],
+  ])('reads the scope a rule declares about itself', (body, expected) => {
+    expect(declaredScope(body)).toEqual(expected);
+  });
+
+  it('returns nothing when a rule declares no scope', () => {
+    expect(declaredScope('# Regla sin frontmatter\n')).toEqual([]);
+  });
+});
+
+describe('matchesAny', () => {
+  it.each([
+    ['**/*.ts', 'src/app/main.ts', true],
+    ['**/*.ts', 'main.ts', true],
+    ['src/**/*.vue', 'src/components/Card.vue', true],
+    ['src/**/*.vue', 'tests/Card.vue', false],
+    ['**/*.{ts,vue}', 'src/a.vue', true],
+    ['**/*.cs', 'src/a.ts', false],
+  ])('%s vs %s -> %s', (glob, path, expected) => {
+    expect(matchesAny([glob], [path])).toBe(expected);
+  });
+});
+
+describe('relevance pre-filter', () => {
+  const FRONTEND = '---\nglobs: **/*.vue\n---\n# Frontend\nUn componente por archivo.\n';
+  const BACKEND = '---\nglobs: **/*.cs\n---\n# Backend\nUn controlador por recurso.\n';
+  const ALWAYS = '# General\nNada de secretos en el código.\n';
+
+  it('drops a rule that declares itself out of scope', () => {
+    const repo = makeTree({
+      '.claude/rules/frontend.md': FRONTEND,
+      '.claude/rules/backend.md': BACKEND,
+      '.claude/rules/general.md': ALWAYS,
+    });
+
+    const rules = loadRules({ repo, touched: ['src/Api/OrderController.cs'] });
+    const loaded = rules.sources.map((s) => s.path);
+
+    expect(loaded).toContain('backend.md');
+    expect(loaded).toContain('general.md');
+    expect(loaded).not.toContain('frontend.md');
+  });
+
+  // Out-of-scope is not the same as over budget, and a developer wondering why
+  // a convention was not applied needs to be able to tell the two apart.
+  it('records the reason, distinct from a budget cut', () => {
+    const repo = makeTree({ '.claude/rules/frontend.md': FRONTEND });
+    const rules = loadRules({ repo, touched: ['src/a.cs'] });
+
+    expect(rules.omittedSources[0].reason).toContain('fuera de alcance');
+    expect(rules.truncated).toBe(false);
+    expect(rulesTruncationNote(rules)).toBeNull();
+  });
+
+  // Guessing scope from a filename would eventually drop the one rule a pull
+  // request violates, and a gate that misses what it was asked to catch is
+  // worse than one that reads too much.
+  it('keeps a rule that declares no scope, whatever it is called', () => {
+    const repo = makeTree({ '.claude/rules/frontend.md': '# Frontend\nUn componente por archivo.\n' });
+    const rules = loadRules({ repo, touched: ['src/a.cs'] });
+
+    expect(rules.sources.map((s) => s.path)).toContain('frontend.md');
+  });
+
+  it('applies no filter at all when the touched files are unknown', () => {
+    const repo = makeTree({ '.claude/rules/frontend.md': FRONTEND });
+
+    expect(loadRules({ repo }).sources).toHaveLength(1);
+  });
+
+  it('keeps the frontmatter out of what the model reads', () => {
+    const repo = makeTree({ '.claude/rules/frontend.md': FRONTEND });
+    const rules = loadRules({ repo, touched: ['src/Card.vue'] });
+
+    expect(rules.text).toContain('Un componente por archivo');
+    expect(rules.text).not.toContain('globs:');
+  });
+});
+
+describe('rulesSourceNotes', () => {
+  it('says what was read and what was left out, with the reason', () => {
+    const repo = makeTree({
+      '.claude/rules/frontend.md': '---\nglobs: **/*.vue\n---\n# Frontend\n',
+      '.claude/rules/general.md': '# General\n',
+    });
+
+    const notes = rulesSourceNotes(loadRules({ repo, touched: ['src/a.cs'] }));
+
+    expect(notes[0]).toContain('Reglas cargadas (1)');
+    expect(notes[0]).toContain('general.md');
+    expect(notes[1]).toContain('frontend.md');
+    expect(notes[1]).toContain('fuera de alcance');
+  });
+
+  it('says nothing about omissions when there are none', () => {
+    const repo = makeTree({ '.claude/rules/general.md': '# General\n' });
+
+    expect(rulesSourceNotes(loadRules({ repo, touched: ['src/a.cs'] }))).toHaveLength(1);
   });
 });
 

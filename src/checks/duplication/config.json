@@ -1,0 +1,7 @@
+{
+  "blocking": true,
+  "maxDiffChars": 24000,
+  "failOn": ["duplicate"],
+  "threshold": 0.55,
+  "maxCandidates": 5
+}

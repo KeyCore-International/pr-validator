@@ -1,0 +1,38 @@
+name: 'PR Validator — resolve checks'
+description: 'Resolve which checks to run into a matrix, validating the names against the registry.'
+
+inputs:
+  checks:
+    description: 'Comma-separated check names. Empty means "use the repository config, or all of them".'
+    required: false
+    default: ''
+  repo:
+    description: 'Path to the repository being validated'
+    required: false
+    default: '.'
+  config-path:
+    description: 'Per-repository settings file, relative to the repo root.'
+    required: false
+    default: '.pr-validator.json'
+
+outputs:
+  matrix:
+    description: 'JSON array of check names for strategy.matrix'
+    value: ${{ steps.resolve.outputs.matrix }}
+  count:
+    description: 'How many checks will run'
+    value: ${{ steps.resolve.outputs.count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: resolve
+      shell: bash
+      # Always exits 0. An unknown check name is a configuration problem in the
+      # consuming repository, not a defect in the code under review, and this
+      # gate never blocks a merge over the former.
+      run: node "$GITHUB_ACTION_PATH/dist/index.mjs"
+      env:
+        INPUT_CHECKS: ${{ inputs.checks }}
+        INPUT_REPO: ${{ inputs.repo }}
+        INPUT_CONFIG_PATH: ${{ inputs.config-path }}

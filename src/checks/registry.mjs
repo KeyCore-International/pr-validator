@@ -13,11 +13,14 @@
 import * as criteria from './criteria/render.mjs';
 import * as security from './security/render.mjs';
 import * as rules from './rules/render.mjs';
+import * as quality from './quality/render.mjs';
+import * as duplication from './duplication/render.mjs';
+import * as tests from './tests/render.mjs';
 
 /** Display order in the consolidated comment. Stable regardless of job timing. */
 export const CHECK_ORDER = ['criteria', 'security', 'rules', 'quality', 'duplication', 'tests'];
 
-const REGISTRY = { criteria, security, rules };
+const REGISTRY = { criteria, security, rules, quality, duplication, tests };
 
 export class UnknownCheckError extends Error {
   constructor(name) {
