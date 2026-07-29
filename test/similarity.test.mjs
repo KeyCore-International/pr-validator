@@ -16,6 +16,42 @@ describe('tokenize', () => {
   });
 });
 
+// Acronym runs are where the split rule earns its keep, and where a change to
+// it would show first. Pinned so the tokens cannot drift unnoticed.
+describe('tokenize across acronym runs', () => {
+  it.each([
+    ['getHTTPResponseCode', ['http', 'response', 'code']],
+    ['parseURLFromXMLHTTPRequest', ['map', 'url', 'xmlhttp', 'request']],
+    ['IOError', ['io', 'error']],
+    ['ABCd', ['ab', 'cd']],
+  ])('splits %s where it always did', (name, expected) => {
+    expect(tokenize(name)).toEqual(expected);
+  });
+});
+
+// A name reaches the tokeniser straight from a regex capture on a line of
+// somebody else's pull request, and is tokenised again for every candidate it
+// is compared against. Unbounded, a run of capitals held a runner CPU for the
+// whole job — the fork case needs no permissions and no secrets.
+describe('tokenize under hostile input', () => {
+  it('reads a bounded prefix of an enormous name', () => {
+    expect(tokenize('A'.repeat(400_000))).toEqual(['a'.repeat(200)]);
+  });
+
+  it('bounds the tokens it returns for a long identifier-shaped name', () => {
+    expect(tokenize('GetOrderTotal'.repeat(5_000)).join('').length).toBeLessThanOrEqual(200);
+  });
+
+  // Wall clock, deliberately generous: what matters is that the work stopped
+  // growing with the length of the name, not how loaded this machine is.
+  it('finishes promptly on a long run of capitals', () => {
+    const started = Date.now();
+    tokenize('A'.repeat(400_000));
+
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+});
+
 describe('nameSimilarity', () => {
   // The pair this check exists to catch: the same idea, two authors.
   it('sees through casing, verbs and plurals', () => {
@@ -113,6 +149,25 @@ describe('normalizeBody', () => {
   });
 });
 
+// The strippers are not linear on hostile input: a comment opener with nothing
+// closing it scans to the end of the string, and so does every escaped quote.
+// A body is other people's source, so its size is theirs to choose.
+describe('normalizeBody under hostile input', () => {
+  it('reads a bounded prefix of one enormous line', () => {
+    const tokens = normalizeBody('/* '.repeat(200_000));
+
+    expect(tokens.length).toBeGreaterThan(0);
+    expect(tokens.length).toBeLessThanOrEqual(20_000);
+  });
+
+  it('finishes promptly on a body full of unclosed quotes', () => {
+    const started = Date.now();
+    normalizeBody('\\"'.repeat(200_000));
+
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
+
 describe('bodySimilarity', () => {
   // The finding the other two signals cannot make: renamed everything, same work.
   it('sees the same routine under different names', () => {
@@ -153,6 +208,26 @@ describe('scorePair', () => {
     );
 
     expect(out.score).toBeGreaterThan(DEFAULT_THRESHOLD);
+  });
+
+  // The length bounds must not move a single number. These are the four this
+  // pair produced before they existed.
+  it('scores a realistic pair exactly as it did before the bounds', () => {
+    const out = scorePair(
+      symbol(),
+      symbol({
+        name: 'ComputeSum',
+        path: 'src/Old.cs',
+        line: 5,
+        signature: 'public decimal ComputeSum(Invoice invoice)',
+        body: LOOP_B,
+      }),
+    );
+
+    expect(out.name).toBe(1);
+    expect(out.body).toBe(1);
+    expect(out.signature).toBeCloseTo(0.6, 10);
+    expect(out.score).toBe(1);
   });
 
   it('stays below the threshold for unrelated work', () => {
@@ -249,5 +324,64 @@ describe('exclusions', () => {
     const kept = applyExclusions([symbol(), { name: 'OrderDto', kind: 'method', path: 'src/D.cs' }]);
 
     expect(kept.map((s) => s.name)).toEqual(['CalculateTotal']);
+  });
+});
+
+// The pre-filter exists so the pair loop is not quadratic over the whole index.
+// It has to be arithmetic rather than a heuristic: the finding this check exists
+// to make is the renamed copy, where the name and signature signals are both 0
+// and only the body says anything.
+describe('the pre-filter never costs a real finding', () => {
+  it('still finds a renamed copy with nothing else in common', () => {
+    const introduced = symbol({
+      name: 'CalculateOrderTotal',
+      path: 'src/New.cs',
+      signature: 'public decimal CalculateOrderTotal(Order order)',
+      body: LOOP_A,
+    });
+    // Different name, different parameter type, same routine.
+    const existing = symbol({
+      name: 'Slugificar',
+      path: 'src/Old.cs',
+      line: 5,
+      signature: 'public decimal Slugificar(Invoice invoice)',
+      body: LOOP_B,
+    });
+
+    const [finding] = findDuplicates({ symbols: [introduced], index: [existing] });
+
+    expect(finding?.matches[0].candidate.path).toBe('src/Old.cs');
+  });
+
+  it('keeps a pair that shares only a name token', () => {
+    const introduced = symbol({ name: 'SendInvoiceEmail', body: 'a();', signature: 'void SendInvoiceEmail()' });
+    const existing = symbol({
+      name: 'SendEmail',
+      path: 'src/Old.cs',
+      line: 9,
+      body: 'a();',
+      signature: 'void SendEmail()',
+    });
+
+    expect(scorePair(introduced, existing).name).toBeGreaterThan(0.9);
+  });
+
+  it('drops a pair no scoring could have saved', () => {
+    const introduced = symbol({
+      name: 'CalculateTotal',
+      signature: 'decimal CalculateTotal(Order o)',
+      body: LOOP_A,
+    });
+    // No shared token, different arity, and a body far too small for the ratio to
+    // reach the body-only floor.
+    const tiny = symbol({
+      name: 'Slugify',
+      path: 'src/Text.cs',
+      line: 3,
+      signature: 'string Slugify(string a, string b)',
+      body: 'return 1;',
+    });
+
+    expect(findDuplicates({ symbols: [introduced], index: [tiny] })).toEqual([]);
   });
 });

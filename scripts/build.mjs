@@ -9,8 +9,9 @@
 
 import { build } from 'esbuild';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveRawImport } from './raw-import.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const VERIFY = process.argv.includes('--verify');
@@ -31,14 +32,13 @@ const TARGETS = [
 const rawTextPlugin = {
   name: 'raw-text',
   setup(pluginBuild) {
-    // The resolved path is REPO-RELATIVE, not absolute. esbuild writes the
-    // module path into the bundle as a comment, so an absolute path would both
-    // make the build unreproducible across machines and publish the author's
-    // local directory layout in a public repository.
+    // `resolveRawImport` decides which file a specifier may reach and returns a
+    // REPO-RELATIVE path; it throws for anything outside src/checks/*.md, which
+    // esbuild reports as a build error naming the importer. The filter stays
+    // broad on purpose: narrowing it would let a rejected specifier fall
+    // through to esbuild's own resolution instead of failing the build.
     pluginBuild.onResolve({ filter: /\?raw$/ }, (args) => ({
-      path: relative(ROOT, resolve(args.resolveDir, args.path.replace(/\?raw$/, '')))
-        .split(sep)
-        .join('/'),
+      path: resolveRawImport(args.path, args.resolveDir, ROOT),
       namespace: 'raw-text',
     }));
 

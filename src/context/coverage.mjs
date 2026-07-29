@@ -14,6 +14,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isRegularFileWithin } from './files.mjs';
 
 /** Filenames and directories that mean "this file is a test". */
 const TEST_FILE = /(\.|_)(test|spec)\.[a-z]+$|Tests?\.(cs|php|java|kt)$|(^|\/)(tests?|__tests__|spec)\//i;
@@ -48,20 +49,36 @@ export function findTestFiles(repo = '.') {
     .filter((path) => TEST_FILE.test(path));
 }
 
-/** Read the test corpus once; every symbol is then a lookup against it. */
+/**
+ * Read the test corpus once; every symbol is then a lookup against it.
+ *
+ * @returns {{text: string, refused: number}}
+ */
 function readTestCorpus(repo, files) {
   const corpus = [];
+  let refused = 0;
 
   for (const path of files) {
+    const full = join(repo, path);
+
+    // Same guard as the rules corpus and the symbol index: only a regular file
+    // that really lives inside the checkout is read. Leaving one out can only
+    // make a symbol look LESS covered, which costs a developer a question and
+    // never hides one.
+    if (!isRegularFileWithin(full, repo)) {
+      refused += 1;
+      continue;
+    }
+
     try {
-      corpus.push(readFileSync(join(repo, path), 'utf8').slice(0, MAX_TEST_FILE_CHARS));
+      corpus.push(readFileSync(full, 'utf8').slice(0, MAX_TEST_FILE_CHARS));
     } catch {
       // A file listed by git but unreadable here — submodule, permissions,
       // already deleted in the working tree — is simply not part of the corpus.
     }
   }
 
-  return corpus.join('\n');
+  return { text: corpus.join('\n'), refused };
 }
 
 /**
@@ -73,6 +90,7 @@ function readTestCorpus(repo, files) {
  * @returns {{
  *   hasTestSuite: boolean,
  *   testFileCount: number,
+ *   refusedTestFiles: number,
  *   covered: Array<object>,
  *   orphans: Array<object>
  * }}
@@ -84,10 +102,10 @@ export function crossWithTests({ symbols = [], repo = '.' } = {}) {
   // to cross against, and the check says exactly that instead of reporting
   // every symbol as uncovered.
   if (!testFiles.length) {
-    return { hasTestSuite: false, testFileCount: 0, covered: [], orphans: [] };
+    return { hasTestSuite: false, testFileCount: 0, refusedTestFiles: 0, covered: [], orphans: [] };
   }
 
-  const corpus = readTestCorpus(repo, testFiles);
+  const { text: corpus, refused } = readTestCorpus(repo, testFiles);
   const covered = [];
   const orphans = [];
 
@@ -98,7 +116,16 @@ export function crossWithTests({ symbols = [], repo = '.' } = {}) {
     (mentioned ? covered : orphans).push(symbol);
   }
 
-  return { hasTestSuite: true, testFileCount: testFiles.length, covered, orphans };
+  // `testFileCount` stays the number of test files FOUND; `refusedTestFiles`
+  // says how many of them the read guard would not open, so the difference is
+  // visible rather than folded into one number.
+  return {
+    hasTestSuite: true,
+    testFileCount: testFiles.length,
+    refusedTestFiles: refused,
+    covered,
+    orphans,
+  };
 }
 
 function escapeRegExp(value) {

@@ -61,7 +61,7 @@ jobs:
       # ...pasos propios de tu stack
 
   validate:
-    uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v3
+    uses: KeyCore-International/pr-validator/.github/workflows/pr-validation.yml@v4
     with:
       base: develop
     secrets:
@@ -171,9 +171,9 @@ credenciales. Si todos aparecen como error, falta `AI_GATEWAY_API_KEY` o
 
 ## Actualizaciones
 
-Fijar `@v3` implica recibir cada corrección y mejora automáticamente en el
+Fijar `@v4` implica recibir cada corrección y mejora automáticamente en el
 siguiente PR, sin tocar el repositorio. Para congelar una versión concreta,
-fija `@v3.0.0`.
+fija `@v4.0.0`.
 
 Los majors anteriores siguen existiendo y no cambian. Lo que hay que revisar
 antes de subir la referencia:
@@ -184,3 +184,17 @@ antes de subir la referencia:
   empieza a correr `quality`, `duplication` y `tests`. Si tenías marcados los
   checks como *required* en la protección de rama, añade los tres nuevos después
   de su primera corrida.
+- **De `@v3` a `@v4`**: el `.pr-validator.json` de la rama del PR deja de poder
+  aflojar el gate. Revisa si tu repositorio tiene uno commiteado que use
+  `blocking: false`, un presupuesto muy bajo (`maxDiffChars`, `maxRulesChars`,
+  `attempts`) o una lista `checks` reducida: en `v4` eso se ignora o se acota, y se
+  declara en el comentario del PR.
+
+  Si el ajuste era intencional, sigue siendo posible desde donde no lo escribe
+  quien abre el PR: el `checks` input del workflow, o el mismo
+  `.pr-validator.json` una vez mergeado a la rama base.
+
+  Dos cosas más pueden empezar a fallar donde antes pasaban en verde, y en ambos
+  casos porque antes no se estaba revisando nada: un corpus de reglas que no cabe
+  en `maxRulesChars` (súbelo, o reduce el corpus) y un fallo causado por el
+  contenido del PR, como un glob sin cerrar en un archivo de reglas.

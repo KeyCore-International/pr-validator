@@ -15,7 +15,7 @@
 // does not hold a team hostage over either.
 
 import { writeFileSync } from 'node:fs';
-import { listChecks, sortChecks } from './checks/registry.mjs';
+import { listChecks, mandatoryChecks, sortChecks } from './checks/registry.mjs';
 import { loadRepoConfig, requestedChecks } from './context/repo-config.mjs';
 
 function parseList(value) {
@@ -40,12 +40,19 @@ export function resolveChecks({ input = '', repo = '.', configPath } = {}) {
   const fromInput = parseList(input);
   let requested = fromInput;
   let source = 'input del workflow';
+  // The workflow input comes from the consuming repository's own workflow file on
+  // the base branch, so it is allowed to narrow the run. The config file is read
+  // from the head checkout — the branch under review — and is not.
+  let fromHead = false;
 
   if (!requested) {
     const loaded = loadRepoConfig({ repo, configPath });
     warnings.push(...loaded.notes);
     requested = requestedChecks(loaded.config);
-    if (requested) source = `\`${configPath || '.pr-validator.json'}\``;
+    if (requested) {
+      source = `\`${configPath || '.pr-validator.json'}\``;
+      fromHead = true;
+    }
   }
 
   if (!requested) {
@@ -70,6 +77,20 @@ export function resolveChecks({ input = '', repo = '.', configPath } = {}) {
   if (!known.length) {
     warnings.push('Ningún nombre válido en la lista configurada; se ejecutan todos los checks.');
     return { checks: available, source: 'todos los checks implementados', warnings };
+  }
+
+  // A head-side list may add checks; it may not take one away. Anything the
+  // validator ships as blocking is put back, and the addition is declared so the
+  // branch is not left wondering why its list was not obeyed.
+  if (fromHead) {
+    const floor = mandatoryChecks().filter((name) => !known.includes(name));
+    if (floor.length) {
+      warnings.push(
+        `${source} omite checks bloqueantes (${floor.join(', ')}): se ejecutan de todos modos. ` +
+          'La lista de un archivo en la rama del PR puede añadir checks, nunca quitarlos.',
+      );
+      return { checks: sortChecks([...known, ...floor]), source, warnings };
+    }
   }
 
   return { checks: sortChecks(known), source, warnings };

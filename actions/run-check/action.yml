@@ -58,4 +58,14 @@ runs:
         PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_BODY: ${{ github.event.pull_request.body }}
-        PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        # A fork pull request is one whose head branch lives in a DIFFERENT
+        # repository than the base, so the comparison is what decides it.
+        # `head.repo.fork` looks right and is not: it is a property of the head
+        # REPOSITORY ("this repo is a fork of some parent"), so in a consuming
+        # repository created with the Fork button it is true for EVERY pull
+        # request — including internal ones, which do receive secrets — and all
+        # the blocking checks would skip in green with the gate never firing.
+        # When the head repository has been deleted the left side is null, the
+        # comparison yields true, and the checks skip: no secrets to run with
+        # either way.
+        PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name }}

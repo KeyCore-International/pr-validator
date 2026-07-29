@@ -61,13 +61,28 @@ const SYNONYMS = new Map(
   }),
 );
 
+/**
+ * Hard bound on the text this file will look at.
+ *
+ * The extractors already cap what they store (`src/symbols/limits.mjs`), and
+ * this repeats the ceiling at the sink so the guarantee holds whoever calls:
+ * a name is scored against every indexed symbol, so its length must never be
+ * the caller's to choose. Well past any identifier, so nothing real is cut.
+ */
+const MAX_NAME_CHARS = 200;
+
 /** Split an identifier into meaningful lowercase tokens. */
 export function tokenize(name) {
   return String(name || '')
+    .slice(0, MAX_NAME_CHARS)
     // camelCase and PascalCase boundaries, including acronym runs such as
     // `HTTPClient` -> `HTTP` + `Client`.
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    // One capital before a capitalised word, rather than the whole run of
+    // capitals: `([A-Z]+)([A-Z][a-z])` splits at exactly the same places, but
+    // gives its match back one character at a time at every start offset, so a
+    // long run of capitals costs O(n^2). This form never backtracks.
+    .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
     .split(/[^A-Za-z0-9]+/)
     .map((token) => token.toLowerCase())
     .filter(Boolean)

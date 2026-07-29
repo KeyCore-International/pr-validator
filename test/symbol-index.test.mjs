@@ -74,6 +74,20 @@ describe('bodyLines', () => {
 
     expect(bodyLines(lines, 0, 10)).toHaveLength(10);
   });
+
+  // A line budget bounds nothing on its own: one line can be as long as the
+  // file it sits in, and everything that reads the body afterwards pays for it.
+  it('stops at the character budget however long a single line is', () => {
+    const lines = ['void A() {', 'x'.repeat(400_000), '}'];
+
+    expect(bodyLines(lines, 0, 40, 100).join('').length).toBe(100);
+  });
+
+  it('bounds the window by default too', () => {
+    const lines = ['void A() {', 'x'.repeat(400_000), '}'];
+
+    expect(bodyLines(lines, 0).join('\n').length).toBeLessThan(20_000);
+  });
 });
 
 describe('buildSymbolIndex', () => {

@@ -148,6 +148,25 @@ describe('vue symbols', () => {
   });
 });
 
+// A name is a regex capture from a line the pull request wrote, so its length
+// is the author's to choose. It is stored bounded, the way `signature` always
+// was: whole, it reaches the tokeniser once per candidate it is compared with.
+describe('symbol names are stored bounded', () => {
+  const huge = 'A'.repeat(400_000);
+
+  it.each([
+    ['a C# type', () => csharp(lines(`public class ${huge}`))],
+    ['a C# method', () => csharp(lines(`    public void ${huge}(int x)`))],
+    ['a TypeScript function', () => typescript(lines(`export function ${huge}(a) {`))],
+    ['a PHP method', () => php(lines(`    public function ${huge}() {`))],
+    ['a Vue component', () => vue([{ line: 1, text: '<template>' }], `src/${huge}.vue`)],
+  ])('caps the name of %s', (_what, run) => {
+    const [symbol] = run();
+
+    expect(symbol.name).toHaveLength(200);
+  });
+});
+
 describe('extractorFor', () => {
   it.each(['a.cs', 'a.ts', 'a.tsx', 'a.js', 'a.vue', 'a.php'])('supports %s', (path) => {
     expect(extractorFor(path)).toBeTypeOf('function');
@@ -183,6 +202,49 @@ describe('addedLinesByFile', () => {
 
   it('ignores removed lines when advancing the counter', () => {
     expect(addedLinesByFile(patch).get('Svc.cs')[0].text).toContain('Nuevo');
+  });
+
+  // The author writes the content of an added line, so a line reading
+  // `++ b/dev/null` arrives here shaped exactly like a file header. Honouring it
+  // pointed the parser away from the file and dropped every symbol the change
+  // introduced, which green-skips the blocking checks that read them.
+  it('treats a header-shaped added line as content, not as a header', () => {
+    const forged = [
+      'diff --git a/Svc.cs b/Svc.cs',
+      '--- a/Svc.cs',
+      '+++ b/Svc.cs',
+      '@@ -1,2 +1,4 @@',
+      ' public class A',
+      '+++ b/dev/null',
+      '+    public void Nuevo() { }',
+      ' }',
+    ].join('\n');
+
+    const added = addedLinesByFile(forged).get('Svc.cs');
+
+    expect(added.map((l) => l.text)).toEqual(['++ b/dev/null', '    public void Nuevo() { }']);
+    expect(symbolsFromDiff(forged).map((s) => s.name)).toEqual(['Nuevo']);
+  });
+
+  // A section with no `+++` header of its own leaves nothing to attribute its
+  // lines to. Carrying the previous file's path into it would file another
+  // file's symbols under `Svc.cs`, and a symbol reported at a path that does
+  // not contain it is worse than one not reported at all.
+  it('does not attribute a later section to the previous file', () => {
+    const two = [
+      'diff --git a/Svc.cs b/Svc.cs',
+      '--- a/Svc.cs',
+      '+++ b/Svc.cs',
+      '@@ -0,0 +1 @@',
+      '+    public void Uno() { }',
+      'diff --git a/Otro.cs b/Otro.cs',
+      '@@ -0,0 +1 @@',
+      '+    public void Dos() { }',
+    ].join('\n');
+
+    expect(addedLinesByFile(two).get('Svc.cs').map((l) => l.text)).toEqual([
+      '    public void Uno() { }',
+    ]);
   });
 });
 

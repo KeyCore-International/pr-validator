@@ -23,6 +23,9 @@ export const EXIT = {
   TOOL_ERROR: 2,
 };
 
+/** Hard ceiling for the model's free-text summary. The prompt asks for 500. */
+export const MAX_SUMMARY_CHARS = 700;
+
 /**
  * @param {object} input
  * @param {string} input.check
@@ -59,7 +62,11 @@ export function makeVerdict({
     title: title || check,
     status,
     blocking: Boolean(blocking),
-    summary: String(summary || ''),
+    // Bounded here as well as escaped at the renderer. The prompt asks the model
+    // for under 500 characters, but an instruction in a prompt is not a limit:
+    // this was the one model-supplied field no code bounded, which made it the
+    // place to put anything that had nowhere else to go.
+    summary: String(summary || '').slice(0, MAX_SUMMARY_CHARS),
     rows,
     details,
     notes,
@@ -96,6 +103,33 @@ export function toolErrorVerdict({ check, title, error, meta = {}, notes = [] })
     // (truncation, loaded rule sources) — those stay useful even on failure.
     notes: [String(error).slice(0, 1500), ...notes],
     emptyMessage: 'El check no pudo ejecutarse. No bloquea el merge.',
+    meta,
+  });
+}
+
+/**
+ * Verdict for a change this check could not read.
+ *
+ * "A third party is down" and "this pull request could not be reviewed" are
+ * different claims and only the first one is safe to wave through. Routing both
+ * to `toolErrorVerdict` let an author neutralise a blocking check with a
+ * four-line file — an unparseable glob, a diff too large to buffer — and every
+ * required status still went green with nothing reviewed at all.
+ *
+ * Blocking follows the check's own configuration, so a check the validator ships
+ * as advisory stays advisory.
+ */
+export function unreviewableVerdict({ check, title, error, blocking = true, meta = {}, notes = [] }) {
+  return makeVerdict({
+    check,
+    title,
+    status: STATUS.FAIL,
+    blocking,
+    summary: 'El check no pudo revisar este cambio.',
+    notes: [String(error).slice(0, 1500), ...notes],
+    emptyMessage:
+      'El check no pudo revisar el contenido de este PR. Corrige lo que impide leerlo ' +
+      'y vuelve a ejecutar.',
     meta,
   });
 }

@@ -60,6 +60,10 @@ function statusLabel(verdict) {
       return verdict.status;
   }
 }
+var MAX_PROSE = 700;
+function prose(value, max = MAX_PROSE) {
+  return String(value ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "").replace(/<(\/?)(details|summary|!--|script|style|iframe)/gi, "&lt;$1$2").replace(/-->/g, "--&gt;").trim().slice(0, max);
+}
 function rowsTable(rows) {
   if (!rows.length) return null;
   const lines = ["| # | Detalle | Veredicto | Evidencia |", "|---|---------|-----------|-----------|"];
@@ -70,18 +74,22 @@ function rowsTable(rows) {
 }
 function checkSection(verdict) {
   const parts = [];
-  if (verdict.summary) parts.push(verdict.summary, "");
+  const summary = prose(verdict.summary);
+  if (summary) parts.push(summary, "");
   const table = rowsTable(verdict.rows);
   if (table) parts.push(table, "");
-  else if (verdict.emptyMessage) parts.push(verdict.emptyMessage, "");
+  else if (verdict.emptyMessage) parts.push(prose(verdict.emptyMessage), "");
   if (verdict.details.length) {
     parts.push("#### Qu\xE9 corregir", "");
     for (const detail of verdict.details) {
-      parts.push(`**${detail.heading}**`, "", detail.body, "");
+      parts.push(`**${prose(detail.heading, 200)}**`, "", prose(detail.body), "");
     }
   }
   if (verdict.notes.length) {
-    for (const note of verdict.notes) parts.push(`> ${note}`, "");
+    for (const note of verdict.notes) {
+      const quoted = prose(note).split("\n").map((line) => `> ${line}`).join("\n");
+      parts.push(quoted, "");
+    }
   }
   if (verdict.meta?.model) {
     const tokens = verdict.meta.tokens ? `, ${verdict.meta.tokens} tokens` : "";
@@ -144,6 +152,28 @@ async function gh(path, { token, method = "GET", body, apiUrl, fetchImpl = fetch
   }
   return res.json();
 }
+async function ownIdentity({ token, apiUrl, fetchImpl }) {
+  try {
+    const me = await gh("/user", { token, apiUrl, fetchImpl });
+    if (me?.login) return me.login;
+  } catch {
+  }
+  return "github-actions[bot]";
+}
+async function allComments({ base, token, apiUrl, fetchImpl, maxPages = 10 }) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const batch = await gh(`${base}/comments?per_page=100&page=${page}`, {
+      token,
+      apiUrl,
+      fetchImpl
+    });
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    out.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return out;
+}
 async function upsertComment({
   token,
   owner,
@@ -154,8 +184,14 @@ async function upsertComment({
   fetchImpl = fetch
 }) {
   const base = `/repos/${owner}/${repo}/issues/${issueNumber}`;
-  const comments = await gh(`${base}/comments?per_page=100`, { token, apiUrl, fetchImpl });
-  const existing = comments.find((c) => typeof c.body === "string" && c.body.includes(MARKER));
+  const self = await ownIdentity({ token, apiUrl, fetchImpl });
+  const comments = await allComments({ base, token, apiUrl, fetchImpl });
+  const existing = comments.find(
+    (c) => typeof c.body === "string" && c.body.includes(MARKER) && // No identity resolved means no comment is claimed as ours, so a fresh one
+    // is created. Failing towards a duplicate comment beats overwriting a
+    // stranger's, and beats leaving a forged one standing as the only report.
+    self != null && c.user?.login === self
+  );
   if (existing) {
     await gh(`/repos/${owner}/${repo}/issues/comments/${existing.id}`, {
       token,

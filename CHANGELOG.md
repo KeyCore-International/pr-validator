@@ -4,6 +4,114 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/): los tags `vX.Y.Z` son inmutables
 y el tag `vX` se mueve al último release de ese major.
 
+## [4.0.0] — 2026-07-29
+
+Cierre de los 18 hallazgos de una auditoría de seguridad completa del código de
+las fases A–F (informe en `CLAUDE-SECURITY-20260729-035355/`). El major es
+obligatorio: varios ajustes **cambian el comportamiento para quien ya fijó `@v3`**
+—ver «Cambios incompatibles».
+
+### Cambios incompatibles
+
+- **`.pr-validator.json` de la rama del PR ya no puede aflojar el gate.** El
+  archivo se lee del checkout del *head*, o sea lo escribe quien abre el PR. Un
+  `blocking: false` ahí desarmaba los seis checks con un solo archivo commiteado
+  junto al código ofensivo, y todos los jobs seguían en verde. Ahora ese archivo
+  puede **apretar** el gate, nunca aflojarlo, y todo presupuesto se acota entre un
+  piso y un techo (`BOUNDS` en `src/context/config.mjs`).
+
+  Un presupuesto también es un control del gate: `maxDiffChars: 1` dejaba al
+  modelo razonando sobre un carácter y respondiendo PASS, más silencioso que
+  `blocking: false` porque no imprimía ningún fallo.
+
+  Lo rechazado se declara en el comentario: quien lo configuró merece leer por qué
+  no tuvo efecto.
+
+- **Una lista `checks` en `.pr-validator.json` ya no puede quitar checks.** Puede
+  añadir; los que el validador publica como bloqueantes se reponen y la reposición
+  se declara. El `checks` del workflow sí puede acotar: viene del repo consumidor
+  en la rama base, que no es la rama en revisión.
+
+- **Un corpus de reglas que el presupuesto tira ya no omite en verde.** `empty`
+  distinguía «no escribió reglas» de «se descartó todo», y el segundo caso
+  publicaba un motivo falso —«sin reglas declaradas»— con `CLAUDE.md` intacto en
+  el árbol.
+
+- **Un fallo causado por el contenido revisado ya no se reporta como fallo de
+  infraestructura.** Un glob sin cerrar en un archivo de reglas, cuatro líneas,
+  convertía un check bloqueante en «error de herramienta — no bloquea» y abortaba
+  antes de llamar al modelo: nada del PR quedaba revisado. «Un tercero está caído»
+  y «este PR no se pudo revisar» son afirmaciones distintas y sólo la primera es
+  segura de dejar pasar. La política sigue intacta: la infraestructura nunca
+  bloquea.
+
+- **El bloque ` ```criteria ` del cuerpo del PR ya sólo vale si la tarea no se
+  pudo obtener.** En la ruta de éxito sustituía los criterios de la tarea real
+  —quien es evaluado escribía el contrato— y el comentario seguía encabezado con
+  el id de la tarea real, así que un revisor lo leía como los criterios de verdad.
+
+### Corregido
+
+- **El gate de neutralidad no escaneaba los bundles commiteados**, la clase de
+  archivo de mayor riesgo y justo la del incidente que documenta AGENTS.md.
+  `.gitattributes` los marca `-diff`, git los trata como binarios y el `-I` de
+  `git grep` los saltaba. La fuga histórica de este repositorio pasaba el gate
+  hoy: reproducido contra `edf886e`, donde el bundle contenía una ruta absoluta
+  del autor. Se cambia `-I` por `--text` y se añade `assertBundlesScanned()`, que
+  sale 2 si un bundle no quedó cubierto.
+- **Los archivos de reglas y de código se leían siguiendo symlinks**, exponiendo
+  cualquier archivo legible por el runner al prompt y al gateway. Los rechazos se
+  declaran en `omittedSources` en vez de encogar el corpus en silencio.
+- **`untrustedBlock()` no neutralizaba su propio terminador**, así que el autor
+  cerraba el bloque desde dentro.
+- **El corpus de reglas entraba crudo al prompt** bajo un encabezado que el system
+  prompt trataba como autoritativo. Ahora va envuelto, y `security` y `rules`
+  tienen sección de entrada no confiable que cubre también el diff y el código
+  citado.
+- **Cuerpos de símbolos, firmas y rutas llegaban sin envolver a prompts
+  bloqueantes.** Los cuerpos van en un fence más largo que cualquier racha de
+  backticks que contengan; rutas, tipos y firmas se aplanan a una línea.
+- **Retroceso cuadrático en la tokenización de nombres** fijaba una CPU del runner
+  durante todo el timeout del job.
+- **La detección de fork leía `head.repo.fork`**, así que en un repositorio que es
+  a su vez un fork *todos* los PR se saltaban los seis checks bloqueantes. Y el
+  corto-circuito de fork corre ahora antes de construir el contexto, no después:
+  un PR desde fork ya no paga el índice de símbolos de un resultado que se
+  descarta.
+- **El `summary` del modelo se publicaba verbatim y sin límite** bajo la identidad
+  del bot. El límite de 500 caracteres existía sólo como frase dentro del prompt,
+  una instrucción que ningún código imponía. Ahora se acota y se escapa la
+  estructura markdown de todos los campos.
+- **El comentario consolidado se escribía en cualquier comentario que llevara el
+  marcador**, y el marcador es una constante pública de un repositorio público.
+  El autor del PR podía publicar el primero, ganarlo para siempre y editarlo
+  después. Ahora sólo se actualiza un comentario de la propia identidad del token,
+  y el listado pagina en vez de cortarse en 100.
+- **El plugin `?raw` del build no verificaba contención**, así que un especificador
+  de import podía leer cualquier archivo de la máquina de build e incrustarlo en un
+  bundle público.
+- **Una cabecera de archivo falsificada dentro de un archivo diffeado ocultaba
+  símbolos nuevos** y omitía en verde `duplication` y `tests`. Una línea añadida
+  cuyo contenido es `++ b/dev/null` llega al parser con la forma exacta de una
+  cabecera. Ahora sólo se acepta una cabecera fuera de un hunk.
+- **El índice de símbolos no tenía techo de símbolos**, sólo de archivos: 100
+  archivos de declaraciones mínimas quedan muy por debajo del tope y producen más
+  de un millón de entradas. Se añade techo declarado, pre-filtro aritmético que no
+  puede perder un par válido, precómputo por símbolo, `statSync` antes de leer y
+  presupuesto de reloj.
+- **`release.yml` movía el tag mayor desde cualquier tag de versión empujado**, con
+  los gates leídos de ese mismo árbol, así que se autoacreditaban. Se exige que el
+  commit sea ancestro de la rama por defecto, con esa comprobación antes de
+  ejecutar código del repositorio; `persist-credentials: false`, `--ignore-scripts`
+  y token explícito sólo en el paso que empuja.
+
+### Descartado
+
+- `npm ci` ejecutando scripts de ciclo de vida en el job de release se reportó y se
+  refutó 3/3: ese mismo job ya ejecuta JavaScript del repositorio con el mismo
+  token, así que `--ignore-scripts` no cerraba nada por sí solo. Se añadió de todas
+  formas como endurecimiento junto al resto de F14, no como el arreglo.
+
 ## [3.4.0] — 2026-07-28
 
 ### Añadido

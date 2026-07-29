@@ -7,6 +7,8 @@
 // implementation detail, and reporting it as untested would push people to
 // write tests against things they are free to rename tomorrow.
 
+import { MAX_NAME_CHARS } from './limits.mjs';
+
 const EXPORTED = /^\s*export\s+(?:default\s+)?/;
 
 /** `export function foo(`, `export async function foo(` */
@@ -60,7 +62,13 @@ export function extract(lines) {
       const name = match[1] ?? match[2];
       if (!name) continue;
 
-      out.push({ name, kind, line, signature: text.trim().slice(0, 200), exported: true });
+      out.push({
+        name: name.slice(0, MAX_NAME_CHARS),
+        kind,
+        line,
+        signature: text.trim().slice(0, 200),
+        exported: true,
+      });
       break;
     }
   }

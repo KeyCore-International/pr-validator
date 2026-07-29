@@ -11,6 +11,14 @@ import { applyExclusions, isExcludedPath } from '../similarity/exclusions.mjs';
 import { findDuplicates, DEFAULT_THRESHOLD, MAX_CANDIDATES } from '../similarity/score.mjs';
 
 /**
+ * Wall-clock budget for the whole scoring pass.
+ *
+ * The symbol and file ceilings bound what goes in; this bounds what the loop is
+ * allowed to spend, which is the number a consumer is billed for on every push.
+ */
+const BUDGET_MS = 20_000;
+
+/**
  * The introduced symbols, taken from the index so each carries its body.
  *
  * The index is built from the working tree, which in CI is the pull request's
@@ -70,12 +78,19 @@ export function buildDuplicationContext({
   const introduced = applyExclusions(introducedSymbols(diffText, index.symbols));
   const comparable = applyExclusions(index.symbols);
 
+  // A wall-clock budget on top of the ceilings, because the ceilings bound the
+  // inputs and this bounds the work. Reached, it stops with what it has and says
+  // so — a partial comparison declared is honest; one that quietly ran out of
+  // candidates would read as "nothing duplicates anything here".
+  const deadline = Date.now() + BUDGET_MS;
   const raw = findDuplicates({
     symbols: introduced,
     index: comparable,
     threshold,
     maxCandidates,
+    deadline,
   });
+  const timedOut = Date.now() >= deadline;
 
   // Two symbols the SAME pull request adds can duplicate each other, and the
   // index already contains both — so that case falls out for free. What does
@@ -108,6 +123,8 @@ export function buildDuplicationContext({
   return {
     indexed: index.symbols.length,
     indexTruncated: index.truncated,
+    // The comparison stopped on its budget rather than on running out of pairs.
+    comparisonTruncated: timedOut,
     introduced: introduced.length,
     findings,
   };

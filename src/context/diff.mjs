@@ -10,10 +10,30 @@ import { execFileSync } from 'node:child_process';
 export const DEFAULT_MAX_DIFF_CHARS = 36000;
 
 export class DiffError extends Error {
-  constructor(message) {
+  /**
+   * @param {string} message
+   * @param {{contentFailure?: boolean}} [opts] `contentFailure` marks a failure
+   *   caused by the change under review rather than by the environment, so the
+   *   runner can block on it instead of reporting a non-blocking tool error.
+   */
+  constructor(message, { contentFailure = false } = {}) {
     super(message);
     this.name = 'DiffError';
+    this.contentFailure = contentFailure;
   }
+}
+
+/**
+ * Did `git` fail because its output did not fit the buffer?
+ *
+ * That is a property of the branch, not of the runner, so it has to be told apart
+ * from a genuine git failure: the first means this pull request could not be
+ * reviewed and the second means something is broken here. The `maxChars` budget
+ * cannot prevent it — it applies to the returned string, long after the child has
+ * already been killed.
+ */
+export function isTooLargeError(err) {
+  return err?.code === 'ENOBUFS' || /maxBuffer/i.test(String(err?.message ?? ''));
 }
 
 function git(repo, args) {
@@ -100,7 +120,14 @@ export function buildDiff({ repo = '.', base, head = 'HEAD', maxChars = DEFAULT_
     stat = git(repo, ['diff', '--stat', `${base}...${head}`]).trim();
     diff = git(repo, ['diff', `${base}...${head}`]);
   } catch (err) {
-    throw new DiffError(`git diff ${base}...${head} failed: ${err.message}`);
+    const tooLarge = isTooLargeError(err);
+    throw new DiffError(
+      tooLarge
+        ? `El diff entre ${base} y ${head} excede el máximo que se puede leer (64 MB). ` +
+          'Divide el PR en cambios más pequeños.'
+        : `git diff ${base}...${head} failed: ${err.message}`,
+      { contentFailure: tooLarge },
+    );
   }
 
   const totalChars = diff.length;

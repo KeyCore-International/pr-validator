@@ -9,7 +9,7 @@ import {
 } from '../src/context/repo-config.mjs';
 import { resolveChecks } from '../src/resolve-checks.mjs';
 import { resolveConfig } from '../src/context/config.mjs';
-import { listChecks } from '../src/checks/registry.mjs';
+import { listChecks, mandatoryChecks } from '../src/checks/registry.mjs';
 
 let dir;
 afterEach(() => {
@@ -150,7 +150,7 @@ describe('resolveChecks', () => {
   it('falls back to the repository config when the input is empty', () => {
     const out = resolveChecks({ repo: withConfig(JSON.stringify({ checks: ['security'] })) });
 
-    expect(out.checks).toEqual(['security']);
+    expect(out.checks).toContain('security');
     expect(out.source).toContain('.pr-validator.json');
   });
 
@@ -187,5 +187,39 @@ describe('resolveChecks', () => {
     const out = resolveChecks({ repo: withConfig('{ nope }') });
 
     expect(out.warnings[0]).toContain('no es JSON válido');
+  });
+});
+
+// `.pr-validator.json` is read from the head checkout, so a run list in it is the
+// author of the change choosing which checks are allowed to judge it. The
+// consolidated comment cannot even disclose the omission: its order is built from
+// the resolved matrix, so a check that never ran has no row to be missing from.
+describe('a head-side run list cannot remove a blocking check', () => {
+  it('puts the omitted blocking checks back', () => {
+    const out = resolveChecks({ repo: withConfig(JSON.stringify({ checks: ['rules'] })) });
+
+    expect(out.checks).toEqual(expect.arrayContaining(mandatoryChecks()));
+    expect(out.checks).toContain('rules');
+  });
+
+  it('says which ones it put back', () => {
+    const out = resolveChecks({ repo: withConfig(JSON.stringify({ checks: ['rules'] })) });
+
+    expect(out.warnings.some((w) => w.includes('omite checks bloqueantes'))).toBe(true);
+  });
+
+  it('still lets the file add a check', () => {
+    const out = resolveChecks({ repo: withConfig(JSON.stringify({ checks: listChecks() })) });
+
+    expect(out.checks).toEqual(listChecks());
+    expect(out.warnings.some((w) => w.includes('omite checks bloqueantes'))).toBe(false);
+  });
+
+  // The input comes from the consumer's own workflow on the base branch, which is
+  // not the branch under review, so narrowing there is a legitimate choice.
+  it('leaves the workflow input free to narrow the run', () => {
+    const out = resolveChecks({ input: 'rules', repo: withConfig(null) });
+
+    expect(out.checks).toEqual(['rules']);
   });
 });

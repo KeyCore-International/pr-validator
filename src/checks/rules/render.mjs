@@ -6,7 +6,7 @@
 
 import promptTemplate from './prompt.md?raw';
 import config from './config.json';
-import { cell, diffSection, header, label, outputFormat, text } from '../shared.mjs';
+import { cell, diffSection, header, label, outputFormat, text, untrustedBlock } from '../shared.mjs';
 
 export const meta = {
   name: 'rules',
@@ -25,14 +25,21 @@ const INSTRUCTION =
 export function buildPrompt(ctx) {
   const { diff, rules, base, head, repo, taskId } = ctx;
 
-  if (!rules || rules.empty) {
+  if (!rules || rules.empty || !rules.text) {
     throw new Error('rules check needs a non-empty rules corpus');
   }
 
   const prompt = [
     header({ taskId, head, base, repo }),
     '',
-    `## Project rules\n${rules.text}`,
+    // The corpus is file content read from the pull request's own checkout, so
+    // every byte of it is written by the author of the change being judged. Under
+    // a bare `## Project rules` heading the model read it as the validator's own
+    // instructions, which is an invitation to write a "rule" saying every diff
+    // conforms. It is evidence about the repository, not direction to the model.
+    untrustedBlock('Project rules (declared by the repository)', rules.text, {
+      maxChars: rules.text.length,
+    }),
     '',
     diffSection(diff, { base, head }),
     '',
@@ -78,16 +85,53 @@ export function render(parsed) {
   };
 }
 
+/** How many refused files to name before the message stops being readable. */
+const MAX_UNREADABLE_LISTED = 10;
+
 /**
- * Verdict emitted without calling the model when the repository defines no
- * rules at all (AC-24).
+ * Verdict emitted without calling the model when there is no corpus to judge
+ * against (AC-24).
+ *
+ * "The repository wrote nothing down" and "the repository wrote rules this gate
+ * refused to read" are opposite pieces of news, and only the first means there
+ * is nothing to enforce. Reporting the second as the first is how a corpus
+ * disappears behind a file reorganisation with the gate still green.
  */
 export function noRulesVerdict(rulesCtx) {
+  const unreadable = rulesCtx?.unreadable ?? [];
+  const listed = unreadable.slice(0, MAX_UNREADABLE_LISTED).join(', ');
+  const rest = unreadable.length - MAX_UNREADABLE_LISTED;
+
+  // The budget dropped everything. Saying "sin reglas declaradas" here would be
+  // factually false with the rule files sitting in the tree, and the budget is
+  // settable from the branch being judged, so this outcome must not be green.
+  if (rulesCtx?.budgetExhausted) {
+    const dropped = (rulesCtx.omittedSources ?? []).filter((s) => s.reason === 'presupuesto');
+    const names = dropped.slice(0, MAX_UNREADABLE_LISTED).map((s) => s.path).join(', ');
+    const more = dropped.length - MAX_UNREADABLE_LISTED;
+    return {
+      rows: [],
+      details: [],
+      overall: 'FAIL',
+      counts: { total: 0, relevant: 0, violations: 0 },
+      emptyMessage:
+        `El presupuesto de reglas (${rulesCtx.maxChars ?? 'configurado'} caracteres) no alcanzó para ` +
+        `ningún archivo: se descartaron ${dropped.length} (${names}${more > 0 ? ` y ${more} más` : ''}). ` +
+        'El repositorio sí declara reglas, así que este check no juzgó nada. Sube `maxRulesChars` ' +
+        'o reduce el corpus.',
+    };
+  }
+
   return {
     rows: [],
     details: [],
     overall: 'PASS',
     counts: { total: 0, relevant: 0, violations: 0 },
-    emptyMessage: `Sin reglas declaradas en el repositorio (${rulesCtx?.dir ?? '.claude/rules'}). No hay convenciones que exigir.`,
+    emptyMessage: unreadable.length
+      ? `El repositorio declara ${unreadable.length} archivo(s) de reglas que no se leyeron ` +
+        `(${listed}${rest > 0 ? ` y ${rest} más` : ''}): solo se leen archivos regulares dentro ` +
+        'del repositorio, nunca enlaces simbólicos ni rutas fuera del checkout. No quedó ninguna ' +
+        'regla que evaluar, así que este check no juzgó nada. No bloquea.'
+      : `Sin reglas declaradas en el repositorio (${rulesCtx?.dir ?? '.claude/rules'}). No hay convenciones que exigir.`,
   };
 }

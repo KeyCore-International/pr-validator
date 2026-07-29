@@ -13,8 +13,9 @@
 // a reason that has nothing to do with the code.
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { isRegularFileWithin } from './files.mjs';
 import { extractorFor } from '../symbols/index.mjs';
 
 /** Ceiling on files read. Past this the index is declared partial, never silently short. */
@@ -22,9 +23,28 @@ const MAX_INDEXED_FILES = 4000;
 
 /** Ceiling per file. Anything larger is generated or vendored in practice. */
 const MAX_FILE_CHARS = 400_000;
+/**
+ * Ceiling on indexed symbols, not just on files.
+ *
+ * The file cap does not bound this: a branch of minimal declarations stays far
+ * under 4000 files and still produces well over a million entries, and the pair
+ * loop walks the whole index once per symbol the pull request introduces.
+ */
+const MAX_INDEXED_SYMBOLS = 120_000;
 
 /** How many lines of a symbol's body to keep as its fingerprint source. */
 const MAX_BODY_LINES = 40;
+
+/**
+ * How many characters of it, alongside the line count.
+ *
+ * A line budget bounds nothing on its own: one line can be as long as the file
+ * it sits in, and everything that reads a body afterwards pays for its size.
+ * This works out at 400 characters a line across the whole window — several
+ * times the widest code anybody writes — so a body a person wrote arrives
+ * whole and scores exactly as it did before.
+ */
+const MAX_BODY_CHARS = 16_000;
 
 function git(repo, args) {
   return execFileSync('git', ['-C', repo, ...args], {
@@ -58,15 +78,21 @@ export function indexableFiles(repo = '.') {
  * slightly short, and since this feeds a similarity SIGNAL rather than a
  * verdict, the cost of that is a candidate ranked a little off, never a false
  * finding.
+ *
+ * The window closes on whichever budget runs out first, lines or characters.
  */
-export function bodyLines(lines, startIndex, maxLines = MAX_BODY_LINES) {
+export function bodyLines(lines, startIndex, maxLines = MAX_BODY_LINES, maxChars = MAX_BODY_CHARS) {
   const collected = [];
   let depth = 0;
   let opened = false;
+  let used = 0;
 
-  for (let i = startIndex; i < lines.length && collected.length < maxLines; i += 1) {
-    const line = lines[i];
+  for (let i = startIndex; i < lines.length && collected.length < maxLines && used < maxChars; i += 1) {
+    const room = maxChars - used;
+    const whole = lines[i];
+    const line = whole.length > room ? whole.slice(0, room) : whole;
     collected.push(line);
+    used += line.length;
 
     for (const char of line) {
       if (char === '{') {
@@ -119,11 +145,39 @@ export function buildSymbolIndex({ repo = '.', exclude = () => false } = {}) {
 
   const symbols = [];
   let read = 0;
+  // Listed by git, left out of the index: the ceiling above, plus whatever the
+  // read guard refuses below.
+  let skipped = all.length - selected.length;
+  let symbolsTruncated = false;
 
   for (const path of selected) {
+    const full = join(repo, path);
+
+    // `git ls-files` lists a symlink like any other file, and this index feeds
+    // a prompt: a link to `.git/config` would be quoted into it. Refusing one
+    // only makes the index smaller, which can cost a duplication candidate but
+    // can never invent one.
+    if (!isRegularFileWithin(full, repo)) {
+      skipped += 1;
+      continue;
+    }
+
+    // Size checked before reading, not after. Reading first and discarding meant
+    // a 400 MB file was pulled into memory in full just to be dropped, so the
+    // ceiling protected the loop but not the runner.
+    try {
+      if (statSync(full).size > MAX_FILE_CHARS) {
+        skipped += 1;
+        continue;
+      }
+    } catch {
+      skipped += 1;
+      continue;
+    }
+
     let content;
     try {
-      content = readFileSync(join(repo, path), 'utf8');
+      content = readFileSync(full, 'utf8');
     } catch {
       // Listed by git but unreadable here: a submodule, a permission, a file
       // already gone from the working tree. Not part of the index.
@@ -145,12 +199,21 @@ export function buildSymbolIndex({ repo = '.', exclude = () => false } = {}) {
         body: bodyLines(rawLines, symbol.line - 1).join('\n'),
       });
     }
+
+    // A ceiling on symbols, not only on files. The file cap does not bound this:
+    // 100 files of minimal declarations sit far under it and still yield well over
+    // a million entries, and the scoring pass walks the whole index once per
+    // symbol the pull request introduces.
+    if (symbols.length >= MAX_INDEXED_SYMBOLS) {
+      symbolsTruncated = true;
+      break;
+    }
   }
 
   return {
     symbols,
     fileCount: read,
-    skippedFiles: all.length - selected.length,
-    truncated,
+    skippedFiles: skipped,
+    truncated: truncated || symbolsTruncated,
   };
 }

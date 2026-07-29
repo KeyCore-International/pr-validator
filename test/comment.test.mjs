@@ -195,13 +195,69 @@ describe('upsertComment', () => {
   it('updates the existing comment instead of adding another', async () => {
     const fetchImpl = vi.fn(async (url, init) => {
       if (init?.method === 'PATCH') return json({ id: 42 });
-      return json([{ id: 42, body: `${MARKER}\nviejo` }]);
+      if (String(url).endsWith('/user')) return json({ login: 'github-actions[bot]' });
+      return json([{ id: 42, body: `${MARKER}\nviejo`, user: { login: 'github-actions[bot]' } }]);
     });
 
     const result = await upsertComment({ ...args, fetchImpl });
 
     expect(result).toEqual({ action: 'updated', id: 42 });
-    expect(fetchImpl.mock.calls[1][0]).toContain('/issues/comments/42');
+    expect(fetchImpl.mock.calls.some((c) => String(c[0]).includes('/issues/comments/42'))).toBe(
+      true,
+    );
+  });
+
+  // The marker is a public constant in a public repository, inlined verbatim in
+  // the committed bundle, so the author of the pull request can post a comment
+  // carrying it. Comments come back oldest first, so theirs used to win every
+  // run: the gate updated a comment its author could edit afterwards, and the
+  // real report was never created.
+  it('refuses to write into a comment the author posted', async () => {
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (init?.method === 'POST') return json({ id: 7 });
+      if (String(url).endsWith('/user')) return json({ login: 'github-actions[bot]' });
+      return json([{ id: 42, body: `${MARKER}\nfalso`, user: { login: 'atacante' } }]);
+    });
+
+    const result = await upsertComment({ ...args, fetchImpl });
+
+    expect(result.action).toBe('created');
+    expect(fetchImpl.mock.calls.every((c) => c[1]?.method !== 'PATCH')).toBe(true);
+  });
+
+  it('finds its own comment past the first page of 100', async () => {
+    const filler = (id) => ({ id, body: 'ruido', user: { login: 'alguien' } });
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (init?.method === 'PATCH') return json({ id: 555 });
+      if (String(url).endsWith('/user')) return json({ login: 'github-actions[bot]' });
+      // `endsWith`, not `includes`: `per_page=100` carries the substring `page=1`.
+      if (String(url).endsWith('&page=1')) {
+        return json(Array.from({ length: 100 }, (_, i) => filler(i + 1)));
+      }
+      return json([
+        { id: 555, body: `${MARKER}\nviejo`, user: { login: 'github-actions[bot]' } },
+      ]);
+    });
+
+    const result = await upsertComment({ ...args, fetchImpl });
+
+    expect(result).toEqual({ action: 'updated', id: 555 });
+  });
+
+  // An installation token cannot read /user, which is the ordinary case in
+  // Actions. Falling back to the known bot login keeps the upsert working.
+  it('still updates its own comment when /user is rejected', async () => {
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (init?.method === 'PATCH') return json({ id: 42 });
+      if (String(url).endsWith('/user')) {
+        return { ok: false, status: 403, text: async () => 'forbidden' };
+      }
+      return json([{ id: 42, body: `${MARKER}\nviejo`, user: { login: 'github-actions[bot]' } }]);
+    });
+
+    const result = await upsertComment({ ...args, fetchImpl });
+
+    expect(result).toEqual({ action: 'updated', id: 42 });
   });
 
   it('throws with the status when the API rejects the call', async () => {
@@ -214,3 +270,70 @@ describe('upsertComment', () => {
 function json(body) {
   return { ok: true, status: 200, json: async () => body };
 }
+
+// The summary is model-supplied, and the model is steerable by anything the
+// author wrote. It goes out under the bot's identity, where a reviewer reads it
+// as the gate's own word — so it must not be able to restructure the comment.
+describe('a steered summary cannot restructure the comment', () => {
+  const steered = (summary) =>
+    renderComment({
+      verdicts: [
+        makeVerdict({
+          check: 'security',
+          title: 'Seguridad',
+          status: STATUS.PASS,
+          blocking: true,
+          summary,
+        }),
+      ],
+      expected: ['security'],
+    });
+
+  it('cannot close the collapsed block it sits in', () => {
+    const body = steered('todo bien</details>\n\n| Check | Veredicto |\n|---|---|\n| Todo | PASS |');
+
+    expect(body).not.toContain('todo bien</details>');
+    expect(body).toContain('&lt;/details');
+  });
+
+  it('cannot open an HTML comment that swallows the real rows', () => {
+    const body = steered('nada que ver <!-- el resto queda oculto');
+
+    expect(body).not.toContain('<!-- el resto');
+  });
+
+  it('cannot repeat the marker and confuse the next upsert', () => {
+    const body = steered(`${MARKER} falso`);
+
+    expect(body.split(MARKER).length - 1).toBe(1);
+  });
+
+  it('is bounded even though only the prompt asked for a limit', () => {
+    const verdict = makeVerdict({
+      check: 'security',
+      title: 'S',
+      status: STATUS.PASS,
+      blocking: true,
+      summary: 'x'.repeat(5000),
+    });
+
+    expect(verdict.summary.length).toBeLessThanOrEqual(700);
+  });
+
+  it('keeps a note inside its blockquote across newlines', () => {
+    const body = renderComment({
+      verdicts: [
+        makeVerdict({
+          check: 'security',
+          title: 'S',
+          status: STATUS.PASS,
+          blocking: true,
+          notes: ['primera línea\nsegunda línea'],
+        }),
+      ],
+      expected: ['security'],
+    });
+
+    expect(body).toContain('> primera línea\n> segunda línea');
+  });
+});

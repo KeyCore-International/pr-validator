@@ -12,13 +12,25 @@
 // declare, and everything dropped is reported with its reason. Truncating in
 // silence was the worst failure of the previous generation of this tool.
 
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
+import { isRegularFileWithin } from './files.mjs';
 
 export const DEFAULT_RULES_DIR = join('.claude', 'rules');
 export const DEFAULT_MAX_RULES_CHARS = 48000;
 
 const RULE_FILE_PATTERN = /\.(md|mdc|txt)$/i;
+
+/**
+ * Why a rule file present in the tree was never opened.
+ *
+ * A rule file is read and handed to an external gateway, so only regular files
+ * inside the repository are read — a symlink could name `.git/config` or any
+ * other file the runner can reach. The refusal is recorded like any other
+ * omission: a corpus that shrinks in silence is the failure this tool exists
+ * not to repeat.
+ */
+const UNREADABLE_REASON = 'no es un archivo regular dentro del repositorio';
 
 /**
  * Where conventions live, most specific first.
@@ -55,22 +67,35 @@ function walk(dir) {
   return out;
 }
 
-function isFile(path) {
+/** Is there anything at this path at all? Never follows a link to answer. */
+function exists(path) {
   try {
-    return statSync(path).isFile();
+    return lstatSync(path, { throwIfNoEntry: false }) != null;
   } catch {
     return false;
   }
 }
 
-/** Every rule file that exists, with the label it will carry in the prompt. */
+/**
+ * Every rule file that exists, split into the ones this gate will read and the
+ * ones it refuses to.
+ *
+ * A refused file is NOT dropped here. "Absent" and "present but not readable
+ * as a rule" are different pieces of news, and only the first one is silent:
+ * the second is a convention the repository wrote and this gate did not apply.
+ */
 function discover(repo, rulesDir) {
   const found = [];
+  const blocked = [];
   const seen = new Set();
 
   const sources = rulesDir
     ? [{ kind: 'dir', path: rulesDir, origin: 'reglas del proyecto', absolute: true }]
     : RULE_SOURCES;
+
+  // The tree everything read has to stay inside. In a run it is the checkout;
+  // `rulesDir` is the test seam, and it names its own directory.
+  const root = rulesDir || repo;
 
   for (const source of sources) {
     const base = source.absolute ? source.path : join(repo, source.path);
@@ -79,23 +104,30 @@ function discover(repo, rulesDir) {
       for (const file of walk(base)) {
         if (seen.has(file)) continue;
         seen.add(file);
-        found.push({
+        const entry = {
           file,
           // Labelled relative to its own source folder, so the model sees
           // `naming.md` rather than a path that means nothing to it.
           label: relative(base, file).split(sep).join('/'),
           origin: source.origin,
-        });
+        };
+        (isRegularFileWithin(file, root) ? found : blocked).push(entry);
       }
       continue;
     }
 
-    if (!isFile(base) || seen.has(base)) continue;
-    seen.add(base);
-    found.push({ file: base, label: source.path, origin: source.origin });
+    if (seen.has(base)) continue;
+
+    if (isRegularFileWithin(base, root)) {
+      seen.add(base);
+      found.push({ file: base, label: source.path, origin: source.origin });
+    } else if (exists(base)) {
+      seen.add(base);
+      blocked.push({ file: base, label: source.path, origin: source.origin });
+    }
   }
 
-  return found;
+  return { found, blocked };
 }
 
 /**
@@ -113,6 +145,7 @@ function discover(repo, rulesDir) {
  *   totalChars: number,
  *   truncated: boolean,
  *   omittedSources: Array<{path: string, chars: number, reason: string}>,
+ *   unreadable: string[],
  *   empty: boolean
  * }}
  */
@@ -122,10 +155,18 @@ export function loadRules({
   maxChars = DEFAULT_MAX_RULES_CHARS,
   touched = null,
 } = {}) {
-  const discovered = discover(repo, rulesDir);
+  const { found: discovered, blocked } = discover(repo, rulesDir);
+  const unreadable = blocked.map((entry) => entry.label);
 
   const sources = [];
-  const omittedSources = [];
+  // Refused files head the omissions: they were never opened, so they have no
+  // size and no declared scope, but the corpus is smaller than the repository
+  // looks and that has to reach the comment (AC-79).
+  const omittedSources = blocked.map((entry) => ({
+    path: entry.label,
+    chars: 0,
+    reason: UNREADABLE_REASON,
+  }));
   const parts = [];
   let used = 0;
   let truncated = false;
@@ -173,8 +214,26 @@ export function loadRules({
     text: parts.join('\n\n'),
     totalChars,
     truncated,
+    // Echoed back so a note can state the number that did the dropping.
+    maxChars,
     omittedSources,
-    empty: parts.length === 0,
+    // Rule files the repository declared and this gate refused to read.
+    unreadable,
+    // Every section there was got dropped for budget. Distinct from `empty`
+    // because the fix is different — raise the budget, versus write some rules —
+    // and because a check that skips green claiming "sin reglas declaradas"
+    // while `CLAUDE.md` sits untouched in the tree is stating something false.
+    // The budget is settable from the branch under review, so `maxRulesChars: 1`
+    // used to buy a green skip on a blocking check with no warning attached.
+    budgetExhausted:
+      parts.length === 0 && omittedSources.some((s) => s.reason === 'presupuesto'),
+    // `empty` answers exactly one question: did this repository write nothing
+    // down? A corpus emptied by the read guard, by scope, or by the budget is
+    // the opposite answer — the rules are there, in the tree, and were not
+    // applied — so none of those may reach the runner as "sin reglas
+    // declaradas". Callers that need "is there anything to send to the model"
+    // read `text`.
+    empty: parts.length === 0 && unreadable.length === 0 && omittedSources.length === 0,
   };
 }
 
@@ -213,7 +272,20 @@ export function rulesSourceNotes(rules) {
     );
   }
 
-  const scoped = rules.omittedSources.filter((s) => s.reason !== 'presupuesto');
+  // Its own line, and not folded into the out-of-scope one: "did not apply to
+  // this PR" and "was never opened" send a developer to two different places.
+  const unreadable = rules.omittedSources.filter((s) => s.reason === UNREADABLE_REASON);
+  if (unreadable.length) {
+    notes.push(
+      `Reglas no leídas (${unreadable.length}): ${unreadable.map((s) => s.path).join(', ')}. ` +
+        'Solo se leen archivos regulares dentro del repositorio: un enlace simbólico podría ' +
+        'apuntar a credenciales del runner o a una ruta fuera del checkout.',
+    );
+  }
+
+  const scoped = rules.omittedSources.filter(
+    (s) => s.reason !== 'presupuesto' && s.reason !== UNREADABLE_REASON,
+  );
   if (scoped.length) {
     notes.push(
       `Reglas omitidas por no aplicar a los archivos de este PR (${scoped.length}): ` +
@@ -254,13 +326,26 @@ function stripFrontmatter(body) {
   return String(body || '').replace(FRONTMATTER, '').trim();
 }
 
-/** Does any touched path match any of these globs? */
+/**
+ * Does any touched path match any of these globs?
+ *
+ * A glob nobody can compile is treated as no declared scope at all, so the rule
+ * is kept. That direction is deliberate: reading a convention that did not apply
+ * costs budget, whereas dropping one that did applies no rule at all — and the
+ * throw this replaces reached the runner's catch-all and turned the whole
+ * blocking check into a green "no bloquea", which a four-line file could trigger.
+ */
 export function matchesAny(globs, paths) {
-  const patterns = globs.map(globToRegExp);
+  const patterns = globs.map(globToRegExp).filter(Boolean);
+  if (!patterns.length) return true;
   return paths.some((path) => patterns.some((pattern) => pattern.test(path)));
 }
 
-/** The small glob subset these files actually use: `*`, `**`, `?`, `{a,b}`. */
+/**
+ * The small glob subset these files actually use: `*`, `**`, `?`, `{a,b}`.
+ *
+ * @returns {RegExp|null} null when the glob does not compile.
+ */
 function globToRegExp(glob) {
   let out = '';
   let braces = 0;
@@ -296,5 +381,16 @@ function globToRegExp(glob) {
     }
   }
 
-  return new RegExp(`^${out}$`, 'i');
+  // An unclosed `{` is the common typo, and `globs: **/*.{ts,tsx}` written one
+  // character short of correct used to emit an unterminated group.
+  while (braces > 0) {
+    out += ')';
+    braces -= 1;
+  }
+
+  try {
+    return new RegExp(`^${out}$`, 'i');
+  } catch {
+    return null;
+  }
 }

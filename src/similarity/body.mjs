@@ -50,6 +50,19 @@ const SHINGLE = 4;
 const MIN_TOKENS = 8;
 
 /**
+ * Hard bound on the text normalised in one call.
+ *
+ * A body is other people's source, so its size is theirs to choose, and the
+ * strippers below are not linear on hostile input: a block comment that never
+ * closes, or a run of escaped quotes, makes every start offset scan to the end
+ * of the string, which is quadratic in the length of the body.
+ * `src/context/symbol-index.mjs` already keeps a body window well under this,
+ * so the clamp never touches real code — it is here so no caller can hand the
+ * patterns a string long enough for that cost to matter.
+ */
+const MAX_BODY_CHARS = 20_000;
+
+/**
  * A body reduced to its skeleton.
  *
  * @param {string} body
@@ -57,6 +70,7 @@ const MIN_TOKENS = 8;
  */
 export function normalizeBody(body) {
   const stripped = String(body || '')
+    .slice(0, MAX_BODY_CHARS)
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
     .replace(/(^|\s)#[^\n]*/g, '$1 ') // PHP and shell-style comments
