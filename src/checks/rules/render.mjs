@@ -29,21 +29,36 @@ export function buildPrompt(ctx) {
     throw new Error('rules check needs a non-empty rules corpus');
   }
 
+  // Order matters for cost, not just for reading.
+  //
+  // Prompt caching matches a prefix from the very first token, and the corpus is
+  // the only block in this prompt that repeats between runs — the same rule files,
+  // unchanged, on every push. It therefore goes FIRST, ahead of the header (which
+  // carries the head SHA and so changes every push) and ahead of the diff.
+  //
+  // With the header first, the prefix diverged at token zero and no run could ever
+  // reuse another's. This is also the only one of the six checks where the stable
+  // block is large enough to matter: the others have nothing above the provider's
+  // minimum cacheable prefix, so their order is left alone rather than churned for
+  // a saving that cannot happen.
+  //
+  // The corpus is file content read from the pull request's own checkout, so every
+  // byte of it is written by the author of the change being judged. Under a bare
+  // `## Project rules` heading the model read it as the validator's own
+  // instructions, which is an invitation to write a "rule" saying every diff
+  // conforms. It is evidence about the repository, not direction to the model —
+  // which is why it stays in the user message and fenced, rather than being moved
+  // into the system prompt where it would cache just as well but carry authority.
   const prompt = [
-    header({ taskId, head, base, repo }),
-    '',
-    // The corpus is file content read from the pull request's own checkout, so
-    // every byte of it is written by the author of the change being judged. Under
-    // a bare `## Project rules` heading the model read it as the validator's own
-    // instructions, which is an invitation to write a "rule" saying every diff
-    // conforms. It is evidence about the repository, not direction to the model.
     untrustedBlock('Project rules (declared by the repository)', rules.text, {
       maxChars: rules.text.length,
     }),
     '',
+    header({ taskId, head, base, repo }),
+    '',
     diffSection(diff, { base, head }),
     '',
-    outputFormat(JSON_SHAPE, INSTRUCTION),
+    outputFormat(JSON_SHAPE, INSTRUCTION, { detail: { field: 'reasoning', when: '"status" is "violated"' } }),
   ].join('\n');
 
   return { system: promptTemplate, prompt };

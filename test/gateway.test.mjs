@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { callGateway, extractJson, GatewayError } from '../src/gateway.mjs';
+import { callGateway, extractJson, GatewayError, tokenUsage } from '../src/gateway.mjs';
 import {
   RAW_FENCED,
   RAW_NO_JSON,
@@ -88,5 +88,75 @@ describe('callGateway', () => {
     await callGateway({ ...base, generate, onRetry: (info) => seen.push(info.attempt) });
 
     expect(seen).toEqual([1, 2]);
+  });
+});
+
+// Cache and reasoning tokens were being discarded: the verdict kept only the
+// total. That left two questions unanswerable from our own artifacts — whether
+// prompt caching ever hits, and how much of the bill is reasoning — and both are
+// what decide the next move on cost.
+describe('tokenUsage', () => {
+  it('keeps the cache and reasoning breakdown when the provider reports it', () => {
+    const out = tokenUsage({
+      totalTokens: 13000,
+      inputTokens: 11500,
+      outputTokens: 1500,
+      inputTokenDetails: { cachedTokens: 9000, cacheWriteTokens: 2000 },
+      outputTokenDetails: { reasoningTokens: 900 },
+    });
+
+    expect(out).toEqual({
+      total: 13000,
+      input: 11500,
+      output: 1500,
+      cacheRead: 9000,
+      cacheWrite: 2000,
+      reasoning: 900,
+    });
+  });
+
+  // Providers name these differently and the gateway passes through whichever
+  // the underlying one used.
+  it('accepts the alternative field names', () => {
+    const out = tokenUsage({
+      inputTokenDetails: { cacheReadTokens: 10, cacheCreationTokens: 20 },
+    });
+
+    expect(out.cacheRead).toBe(10);
+    expect(out.cacheWrite).toBe(20);
+  });
+
+  // A number nobody reported must not read as zero: "no cache hits" and "this
+  // provider does not tell us" are different answers, and only one of them is
+  // evidence that the reordering worked.
+  it('omits what was not reported rather than defaulting it to zero', () => {
+    const out = tokenUsage({ totalTokens: 100 });
+
+    expect(out).toEqual({ total: 100 });
+    expect('cacheRead' in out).toBe(false);
+  });
+
+  it.each([undefined, null, 'nope'])('survives a usage of %s', (usage) => {
+    expect(tokenUsage(usage)).toEqual({});
+  });
+});
+
+describe('callGateway provider options', () => {
+  it('forwards them to the model call', async () => {
+    const seen = [];
+    const generate = async (args) => {
+      seen.push(args.providerOptions);
+      return { text: '{"ok":true}' };
+    };
+
+    await callGateway({
+      model: 'openai/x',
+      system: 's',
+      prompt: 'p',
+      generate,
+      providerOptions: { openai: { promptCacheKey: 'k' } },
+    });
+
+    expect(seen[0]).toEqual({ openai: { promptCacheKey: 'k' } });
   });
 });

@@ -21,7 +21,7 @@ import { loadRepoConfig, perCheckSettings } from './context/repo-config.mjs';
 import { resolveTaskRef } from './context/task-ref.mjs';
 import { fetchTask } from './context/tasks-api.mjs';
 import { getCheck, UnknownCheckError, listChecks } from './checks/registry.mjs';
-import { callGateway, GatewayError } from './gateway.mjs';
+import { callGateway, GatewayError, tokenUsage } from './gateway.mjs';
 import {
   STATUS,
   isBlockingFailure,
@@ -266,6 +266,32 @@ function shortCircuit({ name, check, inputs, ctx }) {
 }
 
 /**
+ * Provider options that make prompt caching possible, or nothing when it cannot be.
+ *
+ * Only `rules` carries a block big enough to cache: its corpus is 11–12k tokens of
+ * text that is identical between runs. The other five checks have no stable region
+ * above the provider's minimum cacheable prefix — their prompts are a system prompt
+ * of a few hundred tokens followed by a diff that changes with every push — so a
+ * cache key there would buy nothing and only invite the belief that it did.
+ *
+ * The key is per repository and per check because that is exactly the scope over
+ * which the prefix repeats. Sharing one key across checks would be worse than none:
+ * their system prompts differ, so the prefixes diverge at the first token anyway.
+ *
+ * @returns {object|undefined} `providerOptions` for the SDK, or undefined.
+ */
+export function cacheOptions({ model = '', check = '', repo = '' } = {}) {
+  if (check !== 'rules') return undefined;
+
+  const provider = String(model).split('/')[0];
+  // `promptCacheKey` is an OpenAI-family option. Sending it to a provider that
+  // does not know it is not worth the risk of a rejected request.
+  if (provider !== 'openai') return undefined;
+
+  return { openai: { promptCacheKey: `pr-validator:${check}:${repo}` } };
+}
+
+/**
  * Was this failure caused by the change under review, rather than by the world?
  *
  * Deliberately a whitelist. Guessing the other way — treating anything unknown
@@ -441,6 +467,7 @@ export async function runCheck({ inputs, env = process.env, log = console.error 
       prompt: built.prompt,
       attempts: config.attempts,
       accept: check.accept,
+      providerOptions: cacheOptions({ model: config.model, check: name, repo: inputs.repo }),
       onRetry: ({ attempt, attempts, reason }) =>
         log(`attempt ${attempt}/${attempts} (${config.model}, ${name}): ${reason} — retrying`),
     });
@@ -471,6 +498,10 @@ export async function runCheck({ inputs, env = process.env, log = console.error 
       taskId: ctx.taskId,
       counts: rendered.counts,
       tokens: result.usage?.totalTokens ?? null,
+      // Cache hits/writes and reasoning tokens, when the provider reports them.
+      // Kept so the cost of a run can be answered from our own artifacts instead
+      // of from a dashboard that cannot be broken down per check.
+      usage: tokenUsage(result.usage),
       attempt: result.attempt,
     },
   });

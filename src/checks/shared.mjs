@@ -43,13 +43,52 @@ export function text(value, max = 400) {
 /**
  * Shared prompt tail: the JSON contract every check appends to its user prompt.
  * Kept in one place so no check can drift into a different output convention.
+ *
+ * Output tokens are 12% of what we send and 46% of what we pay, so what the model
+ * is asked to write is worth more than what it is asked to read. Four of the six
+ * checks were paying for prose they then threw away: `render()` emits an entry's
+ * explanation only where there is something to fix, so a rule that passed, a
+ * criterion that was met and a pair judged unrelated all produced a paragraph that
+ * never reached the comment.
+ *
+ * `detail` names the one field a developer actually reads and when it is owed. It
+ * is asked for *more* pointedly than before, not less — the saving comes from not
+ * writing it where nobody will see it, never from a thinner explanation of a real
+ * failure.
+ *
+ * @param {string} jsonShape
+ * @param {string} instruction
+ * @param {object} [opts]
+ * @param {{field: string, when?: string}} [opts.detail]
+ *   `field` is the actionable prose key; `when` describes the entries that owe it,
+ *   omitted when every entry does.
  */
-export function outputFormat(jsonShape, instruction) {
-  return `## Output format
-Return ONLY a single JSON object — no markdown fences, no prose before or after — with this exact shape:
-${jsonShape}
-${instruction}
-Be concise: at most 10 entries, each string under 300 characters, summary under 500. Do not quote the diff back.`;
+export function outputFormat(jsonShape, instruction, { detail } = {}) {
+  const lines = [
+    '## Output format',
+    'Return ONLY a single JSON object — no markdown fences, no prose before or after — with this exact shape:',
+    jsonShape,
+    instruction,
+  ];
+
+  if (detail) {
+    const scope = detail.when
+      ? `ONLY for entries where ${detail.when}`
+      : 'for every entry you report';
+    lines.push(
+      `"${detail.field}" is the only text the developer reads in order to fix this. Write it ` +
+        `${scope}: name what is wrong and the concrete change that resolves it, under 300 ` +
+        `characters.${detail.when ? ` Omit "${detail.field}" entirely on every other entry — it is discarded.` : ''}`,
+    );
+  }
+
+  lines.push(
+    'Everything else stays short: labels under 80 characters, at most 10 entries. Write ' +
+      '"summary" only when "overall" is "FAIL", as a single line; omit it on a pass. ' +
+      'Never quote the diff back.',
+  );
+
+  return lines.join('\n');
 }
 
 /** Standard header block for the user prompt. */

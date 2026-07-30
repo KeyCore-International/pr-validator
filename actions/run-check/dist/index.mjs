@@ -36282,12 +36282,23 @@ function cell(value, max = 110) {
 function text(value, max = 400) {
   return String(value ?? "").trim().slice(0, max);
 }
-function outputFormat(jsonShape, instruction) {
-  return `## Output format
-Return ONLY a single JSON object \u2014 no markdown fences, no prose before or after \u2014 with this exact shape:
-${jsonShape}
-${instruction}
-Be concise: at most 10 entries, each string under 300 characters, summary under 500. Do not quote the diff back.`;
+function outputFormat(jsonShape, instruction, { detail } = {}) {
+  const lines = [
+    "## Output format",
+    "Return ONLY a single JSON object \u2014 no markdown fences, no prose before or after \u2014 with this exact shape:",
+    jsonShape,
+    instruction
+  ];
+  if (detail) {
+    const scope = detail.when ? `ONLY for entries where ${detail.when}` : "for every entry you report";
+    lines.push(
+      `"${detail.field}" is the only text the developer reads in order to fix this. Write it ${scope}: name what is wrong and the concrete change that resolves it, under 300 characters.${detail.when ? ` Omit "${detail.field}" entirely on every other entry \u2014 it is discarded.` : ""}`
+    );
+  }
+  lines.push(
+    'Everything else stays short: labels under 80 characters, at most 10 entries. Write "summary" only when "overall" is "FAIL", as a single line; omit it on a pass. Never quote the diff back.'
+  );
+  return lines.join("\n");
 }
 function header({ taskId, head, base, repo, task = null, source = null }) {
   const lines = [
@@ -36423,7 +36434,7 @@ ${task.description || "(no description beyond the title)"}`;
     "",
     diffSection(diff, { base, head }),
     "",
-    outputFormat(JSON_SHAPE, instruction)
+    outputFormat(JSON_SHAPE, instruction, { detail: { field: "reasoning", when: '"verdict" is "not_met" or "partial"' } })
   ].filter((part) => part !== "").join("\n");
   return { system: prompt_default, prompt };
 }
@@ -36518,7 +36529,7 @@ function buildPrompt2(ctx) {
     "",
     diffSection(diff, { base, head }),
     "",
-    outputFormat(JSON_SHAPE2, INSTRUCTION)
+    outputFormat(JSON_SHAPE2, INSTRUCTION, { detail: { field: "recommendation" } })
   ].join("\n");
   return { system: prompt_default2, prompt };
 }
@@ -36603,20 +36614,15 @@ function buildPrompt3(ctx) {
     throw new Error("rules check needs a non-empty rules corpus");
   }
   const prompt = [
-    header({ taskId, head, base, repo }),
-    "",
-    // The corpus is file content read from the pull request's own checkout, so
-    // every byte of it is written by the author of the change being judged. Under
-    // a bare `## Project rules` heading the model read it as the validator's own
-    // instructions, which is an invitation to write a "rule" saying every diff
-    // conforms. It is evidence about the repository, not direction to the model.
     untrustedBlock("Project rules (declared by the repository)", rules.text, {
       maxChars: rules.text.length
     }),
     "",
+    header({ taskId, head, base, repo }),
+    "",
     diffSection(diff, { base, head }),
     "",
-    outputFormat(JSON_SHAPE3, INSTRUCTION2)
+    outputFormat(JSON_SHAPE3, INSTRUCTION2, { detail: { field: "reasoning", when: '"status" is "violated"' } })
   ].join("\n");
   return { system: prompt_default3, prompt };
 }
@@ -36715,7 +36721,7 @@ function buildPrompt4(ctx) {
     "",
     diffSection(diff, { base, head }),
     "",
-    outputFormat(JSON_SHAPE4, INSTRUCTION3)
+    outputFormat(JSON_SHAPE4, INSTRUCTION3, { detail: { field: "recommendation" } })
   ].filter((part) => part !== "").join("\n");
   return { system: prompt_default4, prompt };
 }
@@ -36833,7 +36839,7 @@ function buildPrompt5(ctx) {
     `## Diff stat (${base}...${head})
 ${diff?.stat || "(no changes)"}`,
     "",
-    outputFormat(JSON_SHAPE5, INSTRUCTION4)
+    outputFormat(JSON_SHAPE5, INSTRUCTION4, { detail: { field: "recommendation", when: '"verdict" is "duplicate"' } })
   ].filter((part) => part !== "").join("\n");
   return { system: prompt_default5, prompt };
 }
@@ -36920,7 +36926,7 @@ function buildPrompt6(ctx) {
     `## Diff (${base}...${head})${diff.truncated ? " [TRUNCATED]" : ""}
 ${diff.block}`,
     "",
-    outputFormat(JSON_SHAPE6, INSTRUCTION5)
+    outputFormat(JSON_SHAPE6, INSTRUCTION5, { detail: { field: "suggestion", when: '"verdict" is "needs_test"' } })
   ].filter((part) => part !== "").join("\n");
   return { system: prompt_default6, prompt };
 }
@@ -37014,7 +37020,8 @@ async function callGateway({
   accept: accept7 = () => true,
   onRetry,
   generate,
-  backoffMs = 1500
+  backoffMs = 1500,
+  providerOptions
 }) {
   const call = generate ?? await defaultGenerate();
   let lastError = "";
@@ -37022,7 +37029,7 @@ async function callGateway({
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let reason;
     try {
-      const res = await call({ model, system, prompt });
+      const res = await call({ model, system, prompt, providerOptions });
       lastText = res.text;
       const parsed = extractJson(res.text);
       if (parsed && accept7(parsed)) {
@@ -37045,10 +37052,35 @@ async function callGateway({
 }
 async function defaultGenerate() {
   const { generateText: generateText2 } = await Promise.resolve().then(() => (init_dist6(), dist_exports));
-  return async ({ model, system, prompt }) => {
-    const res = await generateText2({ model, system, prompt });
+  return async ({ model, system, prompt, providerOptions }) => {
+    const res = await generateText2({
+      model,
+      system,
+      prompt,
+      ...providerOptions ? { providerOptions } : {}
+    });
     return { text: res.text, usage: res.usage };
   };
+}
+function tokenUsage(usage) {
+  if (!usage || typeof usage !== "object") return {};
+  const num = (value) => Number.isFinite(Number(value)) ? Number(value) : void 0;
+  const inputDetails = usage.inputTokenDetails ?? {};
+  const outputDetails = usage.outputTokenDetails ?? {};
+  const out = {
+    total: num(usage.totalTokens),
+    input: num(usage.inputTokens),
+    output: num(usage.outputTokens),
+    // Naming differs between providers; the gateway passes through whichever
+    // the underlying one used.
+    cacheRead: num(inputDetails.cachedTokens ?? inputDetails.cacheReadTokens),
+    cacheWrite: num(inputDetails.cacheWriteTokens ?? inputDetails.cacheCreationTokens),
+    reasoning: num(outputDetails.reasoningTokens)
+  };
+  for (const key of Object.keys(out)) {
+    if (out[key] === void 0) delete out[key];
+  }
+  return out;
 }
 
 // src/report/verdict.mjs
@@ -37298,6 +37330,12 @@ function shortCircuit({ name: name17, check: check2, inputs, ctx }) {
   }
   return null;
 }
+function cacheOptions({ model = "", check: check2 = "", repo = "" } = {}) {
+  if (check2 !== "rules") return void 0;
+  const provider = String(model).split("/")[0];
+  if (provider !== "openai") return void 0;
+  return { openai: { promptCacheKey: `pr-validator:${check2}:${repo}` } };
+}
 function isContentFailure(err) {
   if (!err) return false;
   if (err.contentFailure === true) return true;
@@ -37421,6 +37459,7 @@ async function runCheck({ inputs, env = process.env, log = console.error } = {})
       prompt: built.prompt,
       attempts: config2.attempts,
       accept: check2.accept,
+      providerOptions: cacheOptions({ model: config2.model, check: name17, repo: inputs.repo }),
       onRetry: ({ attempt, attempts, reason }) => log(`attempt ${attempt}/${attempts} (${config2.model}, ${name17}): ${reason} \u2014 retrying`)
     });
   } catch (err) {
@@ -37448,6 +37487,10 @@ async function runCheck({ inputs, env = process.env, log = console.error } = {})
       taskId: ctx.taskId,
       counts: rendered.counts,
       tokens: result.usage?.totalTokens ?? null,
+      // Cache hits/writes and reasoning tokens, when the provider reports them.
+      // Kept so the cost of a run can be answered from our own artifacts instead
+      // of from a dashboard that cannot be broken down per check.
+      usage: tokenUsage(result.usage),
       attempt: result.attempt
     }
   });

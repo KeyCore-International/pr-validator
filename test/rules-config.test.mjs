@@ -9,6 +9,8 @@ import {
   rulesSourceNotes,
   rulesTruncationNote,
 } from '../src/context/rules.mjs';
+import * as rules from '../src/checks/rules/render.mjs';
+import { cacheOptions } from '../src/run-check.mjs';
 import {
   BOUNDS,
   gateOverrideNotes,
@@ -389,5 +391,68 @@ describe('gateOverrideNotes', () => {
     const config = resolveConfig({ check: 'security', checkConfig: { failOn: ['high'] } });
 
     expect(config.failOn).toEqual(['high']);
+  });
+});
+
+// Prompt caching matches a prefix from the very first token. The rules corpus is
+// the only block in any of the six prompts that repeats between runs, so it has
+// to come before the header — which carries the head SHA and therefore changes on
+// every push, diverging the prefix at token zero.
+describe('the rules prompt is ordered so caching can work', () => {
+  const built = () =>
+    rules.buildPrompt({
+      diff: { stat: 'x | 1 +', block: '```diff\n+a\n```', truncated: false, empty: false },
+      base: 'origin/develop',
+      head: 'abc123',
+      repo: '.',
+      taskId: 1,
+      rules: { text: '### naming.md\nPascalCase.', empty: false, sources: [{ path: 'naming.md' }] },
+    });
+
+  it('puts the corpus before anything that changes per push', () => {
+    const p = built().prompt;
+
+    expect(p.indexOf('Project rules')).toBeLessThan(p.indexOf('Branch:'));
+    expect(p.indexOf('Project rules')).toBeLessThan(p.indexOf('Diff'));
+  });
+
+  it('starts the prompt with the corpus itself', () => {
+    expect(built().prompt.startsWith('## Project rules')).toBe(true);
+  });
+
+  it('still carries the branch context and the diff', () => {
+    const p = built().prompt;
+
+    expect(p).toContain('abc123');
+    expect(p).toContain('PascalCase');
+    expect(p).toContain('Diff');
+  });
+});
+
+describe('cacheOptions', () => {
+  // Only `rules` has a stable block above the provider's minimum cacheable
+  // prefix. A key on the others would buy nothing and invite the belief it did.
+  it('is set for rules on an openai model', () => {
+    expect(cacheOptions({ model: 'openai/gpt-5.6-luna', check: 'rules', repo: '.' })).toEqual({
+      openai: { promptCacheKey: 'pr-validator:rules:.' },
+    });
+  });
+
+  it.each(['security', 'quality', 'criteria', 'duplication', 'tests'])(
+    'is absent for %s, whose prompt has nothing stable to cache',
+    (check) => {
+      expect(cacheOptions({ model: 'openai/gpt-5.6-luna', check, repo: '.' })).toBeUndefined();
+    },
+  );
+
+  it('is absent for a provider that would not know the option', () => {
+    expect(cacheOptions({ model: 'minimax/minimax-m3', check: 'rules', repo: '.' })).toBeUndefined();
+  });
+
+  it('scopes the key per repository, which is where the prefix repeats', () => {
+    const a = cacheOptions({ model: 'openai/x', check: 'rules', repo: '/a' });
+    const b = cacheOptions({ model: 'openai/x', check: 'rules', repo: '/b' });
+
+    expect(a.openai.promptCacheKey).not.toBe(b.openai.promptCacheKey);
   });
 });

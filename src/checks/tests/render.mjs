@@ -65,7 +65,7 @@ export function buildPrompt(ctx) {
     '',
     `## Diff (${base}...${head})${diff.truncated ? ' [TRUNCATED]' : ''}\n${diff.block}`,
     '',
-    outputFormat(JSON_SHAPE, INSTRUCTION),
+    outputFormat(JSON_SHAPE, INSTRUCTION, { detail: { field: 'suggestion', when: '"verdict" is "needs_test"' } }),
   ]
     .filter((part) => part !== '')
     .join('\n');
