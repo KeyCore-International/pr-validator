@@ -18,9 +18,11 @@ import config from './config.json';
 import {
   cell,
   diffSection,
+  evidence,
   header,
   label,
   outputFormat,
+  resolveOverall,
   text,
   untrustedBlock,
 } from '../shared.mjs';
@@ -74,7 +76,7 @@ export function render(parsed, ctx = {}) {
     id: `Q${index + 1}`,
     label: cell(item.issue, 90),
     verdict: label(item.severity),
-    evidence: cell(item.location, 60),
+    evidence: evidence(item.location, 60),
   }));
 
   const details = items.map((item, index) => ({
@@ -86,10 +88,13 @@ export function render(parsed, ctx = {}) {
   const failOn = ctx.config?.failOn ?? config.failOn;
   const blockingFindings = items.filter((i) => failOn.includes(i.severity));
 
+  const verdict = resolveOverall(parsed.overall, blockingFindings);
+
   return {
     rows,
     details,
-    overall: parsed.overall === 'FAIL' || blockingFindings.length > 0 ? 'FAIL' : 'PASS',
+    overall: verdict.overall,
+    note: verdict.note,
     counts: { total: items.length, blocking: blockingFindings.length },
     emptyMessage: 'Sin observaciones de calidad en el diff.',
   };

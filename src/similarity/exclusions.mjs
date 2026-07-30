@@ -25,6 +25,17 @@ const EXCLUDED_PATHS = [
   /\.min\.[a-z]+$/i,
   /\.d\.ts$/i,
   /(^|\/)migrations?[^/]*\.(cs|php|ts|js)$/i,
+  // Tests, for the same reason as migrations: repetition there is the pattern,
+  // not a defect. Arrange/act/assert makes any two test methods look alike, and
+  // a real run bore that out — eight candidate pairs surfaced on a single pull
+  // request and the model judged all eight unrelated, one model call each. The
+  // check exists to find reimplemented production logic; two tests that set up
+  // the same fixture are doing their job.
+  /(^|\/)(tests?|__tests__|spec)\//i,
+  /\.(test|spec)\.[a-z]+$/i,
+  // `[^/]+`, no `[^/]*`: la convencion es `OrderServiceTests.cs` / `OrderTest.php`.
+  // Con `*`, un controlador de produccion llamado `Test.php` quedaba excluido.
+  /(^|\/)[^/]+Tests?\.(cs|php)$/,
 ];
 
 /** Symbol names that declare shape rather than behaviour. */

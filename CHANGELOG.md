@@ -4,6 +4,41 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/): los tags `vX.Y.Z` son inmutables
 y el tag `vX` se mueve al último release de ese major.
 
+## [4.2.0] — 2026-07-30
+
+Cuatro correcciones salidas de la primera corrida completa sobre un PR real.
+
+### Corregido
+
+- **El veredicto de un check ya no lo decide la palabra del modelo.** Todos los
+  renderizadores hacían `parsed.overall === 'FAIL' || <algo encontrado>`, lo que
+  permitía al modelo suspender un check sin nada dentro que el check bloquee. No es
+  hipotético: un PR quedó bloqueado por un criterio de aceptación que el propio
+  modelo había marcado MANUAL —«el diff no demuestra que las pruebas existentes
+  sigan pasando», cierto de cualquier diff— mientras el `failOn` de ese check es
+  `not_met` y `partial`.
+
+  Un gate que bloquea por una razón que no sabe nombrar enseña a ignorarlo.
+
+  La discrepancia **se reporta, no se descarta**: si el modelo quiso suspender y no
+  había nada que bloquee, el comentario lo dice.
+
+- **`failOn` solo se puede ampliar desde el repositorio, nunca reducir.** Se lee del
+  checkout del head, así que un `failOn: []` desarmaba el check — y lo único que lo
+  impedía era ese `parsed.overall === 'FAIL'` de arriba. Arreglar lo primero sin
+  esto habría reabierto el agujero, así que van juntos.
+
+- **Los archivos de test salen de la comparación de duplicación**, por la misma
+  razón que las migraciones: ahí la repetición es el patrón. Arrange/act/assert hace
+  que dos métodos de test se parezcan siempre. En una corrida real aparecieron ocho
+  pares candidatos y el modelo juzgó los ocho «sin relación» — ocho llamadas al
+  modelo para nada.
+
+- **La evidencia deja de cortarse a mitad de ruta.** `cell()` truncaba por número de
+  caracteres y publicaba fragmentos como `…AuthController.cs:172; Inm`, texto que
+  parece un archivo y no lo es. Ahora corta por el separador y declara cuántas
+  ubicaciones quedaron fuera.
+
 ## [4.1.0] — 2026-07-30
 
 Primer paso de la revisión de costes: hacer que el caching de prompt pueda

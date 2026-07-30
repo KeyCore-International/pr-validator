@@ -385,3 +385,27 @@ describe('the pre-filter never costs a real finding', () => {
     expect(findDuplicates({ symbols: [introduced], index: [tiny] })).toEqual([]);
   });
 });
+
+// Repetition in tests is the pattern, not a defect: arrange/act/assert makes any
+// two test methods look alike. A real run surfaced eight candidate pairs on one
+// pull request and the model judged all eight unrelated — eight model calls for
+// nothing. Same reasoning that already excludes migrations.
+describe('tests are out of the duplication comparison', () => {
+  it.each([
+    'Inmoxphere.Tests.Integration/Tests/SessionCookieAuthTests.cs',
+    'tests/api/orders.test.ts',
+    'src/components/Card.spec.ts',
+    '__tests__/helpers.js',
+    'spec/models/user_spec.rb',
+    'src/OrderServiceTests.cs',
+  ])('leaves %s out', (path) => {
+    expect(isExcludedPath(path)).toBe(true);
+  });
+
+  it.each(['src/Services/OrderService.cs', 'src/api/latest.ts', 'app/Http/Controllers/Test.php'])(
+    'still compares production code at %s',
+    (path) => {
+      expect(isExcludedPath(path)).toBe(false);
+    },
+  );
+});

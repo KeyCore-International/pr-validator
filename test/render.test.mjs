@@ -6,7 +6,7 @@ import * as quality from '../src/checks/quality/render.mjs';
 import * as duplication from '../src/checks/duplication/render.mjs';
 import * as tests from '../src/checks/tests/render.mjs';
 import { getCheck, listChecks, sortChecks, UnknownCheckError } from '../src/checks/registry.mjs';
-import { outputFormat } from '../src/checks/shared.mjs';
+import { evidence, outputFormat, resolveOverall } from '../src/checks/shared.mjs';
 import {
   CRITERIA_WITH_GAPS,
   RULES_WITH_VIOLATION,
@@ -617,5 +617,87 @@ describe('every check declares which field is the actionable one', () => {
     const built = buildFor(name);
 
     expect(built.prompt).toContain(`"${field}" is the only text the developer reads`);
+  });
+});
+
+// A pull request was blocked over an acceptance criterion the model itself had
+// marked MANUAL — "the diff does not prove the existing tests still pass", which
+// is true of every diff — while `failOn` for that check is not_met and partial.
+// A gate that blocks for a reason it cannot name teaches people to ignore it.
+describe('resolveOverall', () => {
+  it('fails when something the check blocks on was found', () => {
+    expect(resolveOverall('PASS', [{ x: 1 }])).toEqual({ overall: 'FAIL', note: null });
+  });
+
+  it('refuses to fail on the model word alone', () => {
+    const out = resolveOverall('FAIL', []);
+
+    expect(out.overall).toBe('PASS');
+  });
+
+  // Reported, not dropped: the model saw something, and a reviewer deserves to
+  // know it did even when it does not stop the merge.
+  it('declares the disagreement instead of swallowing it', () => {
+    expect(resolveOverall('FAIL', []).note).toContain('ninguna entrada quedó en un estado');
+  });
+
+  it('says nothing when model and evidence agree', () => {
+    expect(resolveOverall('PASS', [])).toEqual({ overall: 'PASS', note: null });
+  });
+});
+
+describe('a MANUAL criterion does not block the merge', () => {
+  const manualOnly = {
+    overall: 'FAIL',
+    summary: 'no puedo comprobar los tests desde el diff',
+    criteria: [
+      { id: 'C1', criterion: 'Login entrega cookie', verdict: 'met', evidence: 'a.cs:1' },
+      { id: 'C4', criterion: 'Los tests siguen pasando', verdict: 'manual', evidence: 'no evidence in diff' },
+    ],
+  };
+
+  it('passes, because manual is not what this check fails on', () => {
+    expect(criteria.render(manualOnly, { task: { criteriaBlock: '- a\n- b' } }).overall).toBe('PASS');
+  });
+
+  it('still fails when a criterion is genuinely unmet', () => {
+    const withGap = {
+      ...manualOnly,
+      criteria: [{ id: 'C1', criterion: 'x', verdict: 'not_met', evidence: 'ninguna' }],
+    };
+
+    expect(criteria.render(withGap, { task: { criteriaBlock: '- a' } }).overall).toBe('FAIL');
+  });
+});
+
+// `cell()` truncates by character count, which published fragments like
+// "…AuthController.cs:172; Inm" — text that reads as a path and is not one.
+describe('evidence', () => {
+  it('cuts on the separator and says how many were dropped', () => {
+    const out = evidence('src/Muy/Largo/AuthController.cs:172; src/Otro/Archivo.cs:44; src/Tercero.cs:9', 50);
+
+    expect(out).toContain('más');
+    // Cada ubicación conservada está entera, no en fragmentos: termina en su
+    // número de línea. El aviso de cuántas faltan va al final, tras un espacio.
+    const kept = out.replace(/\s*\+\d+ más$/, '').split(/\s*;\s*/).filter(Boolean);
+    expect(kept.length).toBeGreaterThan(0);
+    for (const part of kept) expect(part).toMatch(/\.cs:\d+$/);
+  });
+
+  it('keeps the end of a single location too long to fit', () => {
+    const out = evidence('src/' + 'x'.repeat(200) + '/Archivo.cs:12', 40);
+
+    expect(out.startsWith('…')).toBe(true);
+    expect(out).toContain('Archivo.cs:12');
+  });
+
+  it('leaves something that already fits alone', () => {
+    expect(evidence('a.cs:1; b.cs:2', 110)).toBe('a.cs:1; b.cs:2');
+  });
+
+  it('never exceeds its budget by more than the tail it announces', () => {
+    const long = Array.from({ length: 20 }, (_, i) => `src/File${i}.cs:${i}`).join('; ');
+
+    expect(evidence(long, 90).length).toBeLessThanOrEqual(100);
   });
 });

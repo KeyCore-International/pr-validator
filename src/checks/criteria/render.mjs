@@ -18,9 +18,11 @@ import config from './config.json';
 import {
   cell,
   diffSection,
+  evidence,
   header,
   label,
   outputFormat,
+  resolveOverall,
   text,
   untrustedBlock,
 } from '../shared.mjs';
@@ -187,7 +189,7 @@ export function render(parsed, ctx = {}) {
     id: item.id ?? '?',
     label: cell(item.criterion, 90),
     verdict: label(item.verdict),
-    evidence: cell(item.evidence, 120),
+    evidence: evidence(item.evidence, 120),
   }));
 
   // Only unmet criteria get prose. The task description itself is never echoed
@@ -205,13 +207,18 @@ export function render(parsed, ctx = {}) {
   // blocking on guesswork. What is missing is still reported — it just does not
   // turn red, because a red that stops nothing teaches people to ignore the
   // colour.
-  const overall =
-    mode === 'inferred' ? 'PASS' : parsed.overall === 'FAIL' || gaps.length > 0 ? 'FAIL' : 'PASS';
+  // A criterion the model marked MANUAL is one it could not verify from the diff —
+  // "the existing integration tests still pass" is true of every diff — and it must
+  // not turn the check red. `gaps` is what this check fails on; the model's own
+  // `overall` no longer outranks it.
+  const verdict =
+    mode === 'inferred' ? { overall: 'PASS', note: null } : resolveOverall(parsed.overall, gaps);
 
   return {
     rows,
     details,
-    overall,
+    overall: verdict.overall,
+    note: verdict.note,
     emptyMessage:
       mode === 'inferred' && gaps.length
         ? 'La tarea no enumera criterios de aceptación; los de arriba se infirieron de su descripción. Lo que falta se reporta como observación y no bloquea.'
