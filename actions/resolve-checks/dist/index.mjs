@@ -105,7 +105,7 @@ var config_default = {
     "not_met",
     "partial"
   ],
-  effort: "high"
+  effort: "max"
 };
 
 // src/checks/shared.mjs
@@ -389,7 +389,7 @@ var config_default2 = {
   failOn: [
     "high"
   ],
-  effort: "high"
+  effort: "max"
 };
 
 // src/checks/security/render.mjs

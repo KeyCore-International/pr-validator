@@ -296,17 +296,22 @@ export function cacheOptions({ model = '', check = '', repo = '' } = {}) {
  * of a word. Deliberately modest at the top: `high` should mean "think properly",
  * not "spend without a ceiling" on a gate that runs on every push.
  */
-const THINKING_BUDGET = { low: 1024, medium: 4096, high: 12288 };
+const THINKING_BUDGET = { low: 1024, medium: 4096, high: 12288, max: 24576 };
 
 /**
  * Translate an effort level into whatever the model's provider actually accepts.
  *
  * The key is not uniform across families, so it is derived from the model id:
  * `openai/gpt-5.6-luna` and `xai/*` take a word, Google takes a token budget,
- * Anthropic takes an enabled-plus-budget object. A provider we do not have a
- * mapping for gets nothing — sending an option a provider does not know risks a
- * rejected request, and a rejected request on a merge gate is worse than running
- * at the model's own default.
+ * Anthropic takes an enabled-plus-budget object, DeepSeek takes a word plus an
+ * explicit thinking flag. A provider we do not have a mapping for gets nothing —
+ * sending an option a provider does not know risks a rejected request, and a
+ * rejected request on a merge gate is worse than running at the model's own
+ * default.
+ *
+ * Neither is the *scale* uniform, which is why the levels are translated rather
+ * than forwarded: the same `max` means a real top rung on DeepSeek and `high`
+ * everywhere else.
  *
  * @returns {object|undefined} `providerOptions`, or undefined when unmappable.
  */
@@ -319,11 +324,26 @@ export function effortOptions({ model = '', effort = '' } = {}) {
   switch (provider) {
     case 'openai':
     case 'xai':
-      return { [provider]: { reasoningEffort: effort } };
+      // Neither family has a rung above `high`, so `max` resolves to it. Sending
+      // the literal would be a rejected request, and a rejected request on a
+      // merge gate reads as an outage — the check goes green with a warning.
+      return { [provider]: { reasoningEffort: effort === 'max' ? 'high' : effort } };
     case 'google':
       return { google: { thinkingConfig: { thinkingBudget: budget } } };
     case 'anthropic':
       return { anthropic: { thinking: { type: 'enabled', budgetTokens: budget } } };
+    case 'deepseek':
+      // Two things this provider does differently. Thinking is off by default
+      // and `reasoningEffort` alone does not switch it on, so the flag has to
+      // travel with it or the option is silently inert. And its own scale is
+      // only `high` and `max`: `low` and `medium` are raised to `high`
+      // server-side, which would make the two cheap checks cost what the
+      // expensive ones cost. `adaptive` is the honest translation of a low
+      // level here — it lets the model spend only where the question warrants
+      // it, instead of paying for a floor we did not ask for.
+      return effort === 'high' || effort === 'max'
+        ? { deepseek: { thinking: { type: 'enabled' }, reasoningEffort: effort } }
+        : { deepseek: { thinking: { type: 'adaptive' } } };
     default:
       return undefined;
   }

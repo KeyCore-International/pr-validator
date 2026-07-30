@@ -74,7 +74,14 @@ Opcional, en la raíz del repositorio consumidor. Permite ajustar el gate sin to
 
 Precedencia, de menor a mayor: **defaults del validador < `config.json` del check < este archivo < inputs del workflow**.
 
-Claves por check: `model`, `attempts`, `maxDiffChars`, `maxRulesChars`, `failOn`, `blocking`, y `threshold` / `maxCandidates` para `duplication`.
+Claves por check: `model`, `attempts`, `maxDiffChars`, `maxRulesChars`, `failOn`, `blocking`, `effort`, y `threshold` / `maxCandidates` para `duplication`.
+
+`effort` es cuánto se le pide pensar al modelo: `low`, `medium`, `high` o `max`,
+y se traduce a lo que acepte el proveedor del modelo configurado. `max` significa
+«el techo de este modelo», no un valor literal: en los que no tienen un escalón
+por encima de `high` —OpenAI, xAI— resuelve a `high`; en los que sí lo tienen
+—DeepSeek— pide el escalón real. Un proveedor sin traducción corre con su propio
+default en vez de recibir una opción que podría rechazar.
 
 Si sólo vas a configurar checks y no a elegir cuáles corren, puedes usar `"checks"` como objeto en vez de `"checksConfig"`.
 
