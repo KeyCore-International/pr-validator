@@ -4,6 +4,53 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/): los tags `vX.Y.Z` son inmutables
 y el tag `vX` se mueve al último release de ese major.
 
+## [4.1.0] — 2026-07-30
+
+Primer paso de la revisión de costes: hacer que el caching de prompt pueda
+funcionar donde tiene sentido, y **poder medir si funciona**. Sin cambios en la
+superficie pública — los `inputs` y `secrets` del workflow son los mismos.
+
+### Añadido
+
+- **El veredicto registra el desglose de tokens.** `meta.usage` trae ahora lecturas
+  y escrituras de caché y tokens de razonamiento, cuando el proveedor los reporta.
+  Antes `callGateway` recibía el objeto `usage` completo y el veredicto se quedaba
+  solo con el total, lo que dejaba sin respuesta dos preguntas que deciden el
+  siguiente movimiento de coste: si la caché acierta alguna vez, y cuánto de la
+  factura es razonamiento. Un campo que el proveedor no reporta se omite en vez de
+  guardarse como cero: «cero aciertos» y «este proveedor no lo dice» son respuestas
+  distintas.
+- **`callGateway` acepta `providerOptions`** y los reenvía al modelo.
+
+### Cambiado
+
+- **El prompt de `rules` empieza por el corpus, no por la cabecera.** El caching de
+  prompt hace match de un prefijo desde el primer token, y la cabecera lleva el SHA
+  del head: cambiaba en cada push, así que el prefijo divergía en el token cero y
+  ninguna corrida podía reutilizar la anterior. El corpus —11–12k tokens de archivos
+  de reglas idénticos entre corridas— pasa al principio.
+
+  Es el único de los seis checks donde esto puede servir. El mínimo cacheable del
+  proveedor son 1.024 tokens de prefijo estable y los system prompts de los otros
+  cinco van de 329 a 892; su orden se deja como estaba en lugar de moverlo por un
+  ahorro que no puede ocurrir.
+
+  El corpus sigue en el mensaje de usuario y envuelto como entrada no confiable.
+  Moverlo al system prompt cachearía igual de bien y le daría autoridad — que es
+  justo lo que la auditoría de seguridad cerró en la versión anterior.
+
+- **`promptCacheKey` por repositorio y check** en modelos de OpenAI, solo para
+  `rules`. El ámbito es ese porque es donde el prefijo se repite; compartir una
+  clave entre checks sería peor que ninguna, ya que sus system prompts difieren y
+  los prefijos divergen igualmente.
+
+### Nota sobre lo que esto todavía no demuestra
+
+El TTL de caché de `gpt-5.6-luna` es de 30 minutos y no admite otro valor. Con
+tráfico de PRs esporádico, que el prefijo sea cacheable no garantiza que se acierte.
+Por eso este cambio entra junto con la medición y no al revés: `meta.usage` dirá si
+hay aciertos antes de que nadie asuma el ahorro.
+
 ## [4.0.0] — 2026-07-29
 
 Cierre de los 18 hallazgos de una auditoría de seguridad completa del código de

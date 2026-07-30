@@ -451,16 +451,11 @@ function buildPrompt3(ctx) {
     throw new Error("rules check needs a non-empty rules corpus");
   }
   const prompt = [
-    header({ taskId, head, base, repo }),
-    "",
-    // The corpus is file content read from the pull request's own checkout, so
-    // every byte of it is written by the author of the change being judged. Under
-    // a bare `## Project rules` heading the model read it as the validator's own
-    // instructions, which is an invitation to write a "rule" saying every diff
-    // conforms. It is evidence about the repository, not direction to the model.
     untrustedBlock("Project rules (declared by the repository)", rules.text, {
       maxChars: rules.text.length
     }),
+    "",
+    header({ taskId, head, base, repo }),
     "",
     diffSection(diff, { base, head }),
     "",

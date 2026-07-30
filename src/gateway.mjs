@@ -74,6 +74,7 @@ export async function callGateway({
   onRetry,
   generate,
   backoffMs = 1500,
+  providerOptions,
 }) {
   const call = generate ?? (await defaultGenerate());
 
@@ -84,7 +85,7 @@ export async function callGateway({
     let reason;
 
     try {
-      const res = await call({ model, system, prompt });
+      const res = await call({ model, system, prompt, providerOptions });
       lastText = res.text;
 
       const parsed = extractJson(res.text);
@@ -118,8 +119,53 @@ export async function callGateway({
 // time of every module that transitively touches this one.
 async function defaultGenerate() {
   const { generateText } = await import('ai');
-  return async ({ model, system, prompt }) => {
-    const res = await generateText({ model, system, prompt });
+  return async ({ model, system, prompt, providerOptions }) => {
+    const res = await generateText({
+      model,
+      system,
+      prompt,
+      ...(providerOptions ? { providerOptions } : {}),
+    });
     return { text: res.text, usage: res.usage };
   };
+}
+
+/**
+ * The token counts worth keeping from a gateway response.
+ *
+ * Cache and reasoning tokens were being thrown away: `callGateway` returned the
+ * whole `usage` object and the verdict kept only the total. That left two
+ * questions unanswerable from our own data — whether prompt caching ever hits,
+ * and how much of the bill is reasoning — and both decide what to do next about
+ * cost. Reading a dashboard is not the same as measuring.
+ *
+ * Every field is optional: providers report what they report, and a missing
+ * number must read as "not reported", never as zero.
+ *
+ * @param {object} [usage]
+ * @returns {{total?: number, input?: number, output?: number,
+ *            cacheRead?: number, cacheWrite?: number, reasoning?: number}}
+ */
+export function tokenUsage(usage) {
+  if (!usage || typeof usage !== 'object') return {};
+
+  const num = (value) => (Number.isFinite(Number(value)) ? Number(value) : undefined);
+  const inputDetails = usage.inputTokenDetails ?? {};
+  const outputDetails = usage.outputTokenDetails ?? {};
+
+  const out = {
+    total: num(usage.totalTokens),
+    input: num(usage.inputTokens),
+    output: num(usage.outputTokens),
+    // Naming differs between providers; the gateway passes through whichever
+    // the underlying one used.
+    cacheRead: num(inputDetails.cachedTokens ?? inputDetails.cacheReadTokens),
+    cacheWrite: num(inputDetails.cacheWriteTokens ?? inputDetails.cacheCreationTokens),
+    reasoning: num(outputDetails.reasoningTokens),
+  };
+
+  for (const key of Object.keys(out)) {
+    if (out[key] === undefined) delete out[key];
+  }
+  return out;
 }

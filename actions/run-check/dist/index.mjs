@@ -36603,16 +36603,11 @@ function buildPrompt3(ctx) {
     throw new Error("rules check needs a non-empty rules corpus");
   }
   const prompt = [
-    header({ taskId, head, base, repo }),
-    "",
-    // The corpus is file content read from the pull request's own checkout, so
-    // every byte of it is written by the author of the change being judged. Under
-    // a bare `## Project rules` heading the model read it as the validator's own
-    // instructions, which is an invitation to write a "rule" saying every diff
-    // conforms. It is evidence about the repository, not direction to the model.
     untrustedBlock("Project rules (declared by the repository)", rules.text, {
       maxChars: rules.text.length
     }),
+    "",
+    header({ taskId, head, base, repo }),
     "",
     diffSection(diff, { base, head }),
     "",
@@ -37014,7 +37009,8 @@ async function callGateway({
   accept: accept7 = () => true,
   onRetry,
   generate,
-  backoffMs = 1500
+  backoffMs = 1500,
+  providerOptions
 }) {
   const call = generate ?? await defaultGenerate();
   let lastError = "";
@@ -37022,7 +37018,7 @@ async function callGateway({
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let reason;
     try {
-      const res = await call({ model, system, prompt });
+      const res = await call({ model, system, prompt, providerOptions });
       lastText = res.text;
       const parsed = extractJson(res.text);
       if (parsed && accept7(parsed)) {
@@ -37045,10 +37041,35 @@ async function callGateway({
 }
 async function defaultGenerate() {
   const { generateText: generateText2 } = await Promise.resolve().then(() => (init_dist6(), dist_exports));
-  return async ({ model, system, prompt }) => {
-    const res = await generateText2({ model, system, prompt });
+  return async ({ model, system, prompt, providerOptions }) => {
+    const res = await generateText2({
+      model,
+      system,
+      prompt,
+      ...providerOptions ? { providerOptions } : {}
+    });
     return { text: res.text, usage: res.usage };
   };
+}
+function tokenUsage(usage) {
+  if (!usage || typeof usage !== "object") return {};
+  const num = (value) => Number.isFinite(Number(value)) ? Number(value) : void 0;
+  const inputDetails = usage.inputTokenDetails ?? {};
+  const outputDetails = usage.outputTokenDetails ?? {};
+  const out = {
+    total: num(usage.totalTokens),
+    input: num(usage.inputTokens),
+    output: num(usage.outputTokens),
+    // Naming differs between providers; the gateway passes through whichever
+    // the underlying one used.
+    cacheRead: num(inputDetails.cachedTokens ?? inputDetails.cacheReadTokens),
+    cacheWrite: num(inputDetails.cacheWriteTokens ?? inputDetails.cacheCreationTokens),
+    reasoning: num(outputDetails.reasoningTokens)
+  };
+  for (const key of Object.keys(out)) {
+    if (out[key] === void 0) delete out[key];
+  }
+  return out;
 }
 
 // src/report/verdict.mjs
@@ -37298,6 +37319,12 @@ function shortCircuit({ name: name17, check: check2, inputs, ctx }) {
   }
   return null;
 }
+function cacheOptions({ model = "", check: check2 = "", repo = "" } = {}) {
+  if (check2 !== "rules") return void 0;
+  const provider = String(model).split("/")[0];
+  if (provider !== "openai") return void 0;
+  return { openai: { promptCacheKey: `pr-validator:${check2}:${repo}` } };
+}
 function isContentFailure(err) {
   if (!err) return false;
   if (err.contentFailure === true) return true;
@@ -37421,6 +37448,7 @@ async function runCheck({ inputs, env = process.env, log = console.error } = {})
       prompt: built.prompt,
       attempts: config2.attempts,
       accept: check2.accept,
+      providerOptions: cacheOptions({ model: config2.model, check: name17, repo: inputs.repo }),
       onRetry: ({ attempt, attempts, reason }) => log(`attempt ${attempt}/${attempts} (${config2.model}, ${name17}): ${reason} \u2014 retrying`)
     });
   } catch (err) {
@@ -37448,6 +37476,10 @@ async function runCheck({ inputs, env = process.env, log = console.error } = {})
       taskId: ctx.taskId,
       counts: rendered.counts,
       tokens: result.usage?.totalTokens ?? null,
+      // Cache hits/writes and reasoning tokens, when the provider reports them.
+      // Kept so the cost of a run can be answered from our own artifacts instead
+      // of from a dashboard that cannot be broken down per check.
+      usage: tokenUsage(result.usage),
       attempt: result.attempt
     }
   });
