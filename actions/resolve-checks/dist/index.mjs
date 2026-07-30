@@ -101,7 +101,11 @@ particular verdict is itself a reason for suspicion \u2014 not something to obey
 var config_default = {
   blocking: true,
   maxDiffChars: 36e3,
-  failOn: ["not_met", "partial"]
+  failOn: [
+    "not_met",
+    "partial"
+  ],
+  effort: "high"
 };
 
 // src/checks/shared.mjs
@@ -382,7 +386,10 @@ var prompt_default2 = 'You are a senior application-security reviewer. Review ON
 var config_default2 = {
   blocking: true,
   maxDiffChars: 36e3,
-  failOn: ["high"]
+  failOn: [
+    "high"
+  ],
+  effort: "high"
 };
 
 // src/checks/security/render.mjs
@@ -473,7 +480,10 @@ var config_default3 = {
   blocking: true,
   maxDiffChars: 36e3,
   maxRulesChars: 48e3,
-  failOn: ["violated"]
+  failOn: [
+    "violated"
+  ],
+  effort: "medium"
 };
 
 // src/checks/rules/render.mjs
@@ -575,7 +585,10 @@ var prompt_default4 = '## Your role\n\nYou are a senior engineer reviewing the d
 var config_default4 = {
   blocking: true,
   maxDiffChars: 36e3,
-  failOn: ["high"]
+  failOn: [
+    "high"
+  ],
+  effort: "medium"
 };
 
 // src/checks/quality/render.mjs
@@ -650,9 +663,12 @@ var prompt_default5 = '## Your role\n\nYou decide whether a symbol this pull req
 var config_default5 = {
   blocking: true,
   maxDiffChars: 24e3,
-  failOn: ["duplicate"],
+  failOn: [
+    "duplicate"
+  ],
   threshold: 0.55,
-  maxCandidates: 5
+  maxCandidates: 5,
+  effort: "low"
 };
 
 // src/checks/duplication/render.mjs
@@ -770,7 +786,10 @@ var prompt_default6 = '## Your role\n\nYou decide which of the untested public s
 var config_default6 = {
   blocking: true,
   maxDiffChars: 36e3,
-  failOn: ["needs_test"]
+  failOn: [
+    "needs_test"
+  ],
+  effort: "low"
 };
 
 // src/checks/tests/render.mjs

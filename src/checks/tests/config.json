@@ -1,5 +1,8 @@
 {
   "blocking": true,
   "maxDiffChars": 36000,
-  "failOn": ["needs_test"]
+  "failOn": [
+    "needs_test"
+  ],
+  "effort": "low"
 }
