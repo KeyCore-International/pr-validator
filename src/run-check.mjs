@@ -491,7 +491,9 @@ export async function runCheck({ inputs, env = process.env, log = console.error 
     summary: result.parsed.summary ?? '',
     rows: rendered.rows,
     details: rendered.details,
-    notes,
+    // A renderer may add a note of its own — the model disagreeing with the
+    // deterministic verdict is reported, not dropped.
+    notes: rendered.note ? [...notes, rendered.note] : notes,
     emptyMessage: rendered.emptyMessage ?? '',
     meta: {
       model: config.model,

@@ -35217,7 +35217,18 @@ var EXCLUDED_PATHS = [
   /\.designer\.[a-z]+$/i,
   /\.min\.[a-z]+$/i,
   /\.d\.ts$/i,
-  /(^|\/)migrations?[^/]*\.(cs|php|ts|js)$/i
+  /(^|\/)migrations?[^/]*\.(cs|php|ts|js)$/i,
+  // Tests, for the same reason as migrations: repetition there is the pattern,
+  // not a defect. Arrange/act/assert makes any two test methods look alike, and
+  // a real run bore that out — eight candidate pairs surfaced on a single pull
+  // request and the model judged all eight unrelated, one model call each. The
+  // check exists to find reimplemented production logic; two tests that set up
+  // the same fixture are doing their job.
+  /(^|\/)(tests?|__tests__|spec)\//i,
+  /\.(test|spec)\.[a-z]+$/i,
+  // `[^/]+`, no `[^/]*`: la convencion es `OrderServiceTests.cs` / `OrderTest.php`.
+  // Con `*`, un controlador de produccion llamado `Test.php` quedaba excluido.
+  /(^|\/)[^/]+Tests?\.(cs|php)$/
 ];
 var EXCLUDED_NAMES = [
   /(Dto|DTO)s?$/,
@@ -35913,7 +35924,12 @@ function resolveConfig({ check: check2, checkConfig = {}, repoConfig = {}, input
     ),
     // Severities that turn a finding into a failing check. Empty means the
     // check never fails on findings, only reports them.
-    failOn: firstDefined(perCheckRepo.failOn, checkConfig.failOn, []),
+    // Union, not override. `failOn` decides which verdicts make a check fail, so
+    // a head-side `failOn: []` was a way to disarm it — and the only thing that
+    // stopped it was every renderer honouring the model's own `overall: FAIL`.
+    // That made a probabilistic signal load-bearing for a deterministic gate.
+    // Widening the set is a legitimate way to tighten; narrowing it is not.
+    failOn: mergeFailOn(checkConfig.failOn, perCheckRepo.failOn),
     // Knobs on `duplication`'s deterministic pre-filter. Deliberately without a
     // validator-wide default: the number belongs to the check that uses it, and
     // a repository drowning in candidates can move it without the validator
@@ -35927,6 +35943,11 @@ function resolveConfig({ check: check2, checkConfig = {}, repoConfig = {}, input
       BOUNDS.maxCandidates
     )
   };
+}
+function mergeFailOn(shipped, requested) {
+  const base = Array.isArray(shipped) ? shipped : [];
+  const extra = Array.isArray(requested) ? requested : [];
+  return [.../* @__PURE__ */ new Set([...base, ...extra])];
 }
 function bounded(value, bounds) {
   if (value === void 0) return void 0;
@@ -36279,6 +36300,21 @@ var label = (token) => LABELS[token] ?? token ?? "?";
 function cell(value, max = 110) {
   return String(value ?? "").replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ").trim().slice(0, max);
 }
+function evidence(value, max = 110) {
+  const flat = cell(value, Number.MAX_SAFE_INTEGER);
+  if (flat.length <= max) return flat;
+  const parts = flat.split(/\s*;\s*/).filter(Boolean);
+  if (parts.length === 1) return `\u2026${flat.slice(-(max - 1))}`;
+  const kept = [];
+  let used = 0;
+  for (const part of parts) {
+    if (used + part.length + 10 > max && kept.length) break;
+    kept.push(part);
+    used += part.length + 2;
+  }
+  const rest = parts.length - kept.length;
+  return rest > 0 ? `${kept.join("; ")} +${rest} m\xE1s` : kept.join("; ");
+}
 function text(value, max = 400) {
   return String(value ?? "").trim().slice(0, max);
 }
@@ -36334,6 +36370,16 @@ function untrustedBlock(label2, content, { maxChars = 4e3 } = {}) {
 <<<${MARKER_TOKEN}_BEGIN ${id}
 ${body}
 ${MARKER_TOKEN}_END ${id}>>>`;
+}
+function resolveOverall(modelOverall, blocking = []) {
+  if (blocking.length > 0) return { overall: "FAIL", note: null };
+  if (modelOverall === "FAIL") {
+    return {
+      overall: "PASS",
+      note: "El modelo marc\xF3 el veredicto global como FAIL, pero ninguna entrada qued\xF3 en un estado que este check bloquee. Se reporta como PASS y se deja constancia: revisa la tabla por si hay algo que merezca atenci\xF3n aunque no frene el merge."
+    };
+  }
+  return { overall: "PASS", note: null };
 }
 function codeFence(content, info = "") {
   const body = String(content ?? "");
@@ -36473,7 +36519,7 @@ Si este PR corrige una incidencia derivada de esa tarea, referencia el id de la 
     id: item.id ?? "?",
     label: cell(item.criterion, 90),
     verdict: label(item.verdict),
-    evidence: cell(item.evidence, 120)
+    evidence: evidence(item.evidence, 120)
   }));
   const gaps = items.filter((i) => i.verdict === "not_met" || i.verdict === "partial");
   const details = gaps.map((gap) => ({
@@ -36481,11 +36527,12 @@ Si este PR corrige una incidencia derivada de esa tarea, referencia el id de la 
     heading: `${gap.id ?? "?"} \u2014 ${cell(gap.criterion, 90)} (${label(gap.verdict)})`,
     body: text(gap.reasoning, 400)
   }));
-  const overall = mode === "inferred" ? "PASS" : parsed.overall === "FAIL" || gaps.length > 0 ? "FAIL" : "PASS";
+  const verdict = mode === "inferred" ? { overall: "PASS", note: null } : resolveOverall(parsed.overall, gaps);
   return {
     rows,
     details,
-    overall,
+    overall: verdict.overall,
+    note: verdict.note,
     emptyMessage: mode === "inferred" && gaps.length ? "La tarea no enumera criterios de aceptaci\xF3n; los de arriba se infirieron de su descripci\xF3n. Lo que falta se reporta como observaci\xF3n y no bloquea." : "",
     counts: { total: items.length, gaps: gaps.length, mode }
   };
@@ -36543,7 +36590,7 @@ function render2(parsed, ctx = {}) {
     id: `S${index + 1}`,
     label: cell(item.issue, 90),
     verdict: label(item.severity),
-    evidence: cell(item.location, 60)
+    evidence: evidence(item.location, 60)
   }));
   const details = items.map((item, index) => ({
     id: `S${index + 1}`,
@@ -36552,10 +36599,12 @@ function render2(parsed, ctx = {}) {
   }));
   const failOn = ctx.config?.failOn ?? config_default2.failOn;
   const blockingFindings = items.filter((i) => failOn.includes(i.severity));
+  const verdict = resolveOverall(parsed.overall, blockingFindings);
   return {
     rows,
     details,
-    overall: parsed.overall === "FAIL" || blockingFindings.length > 0 ? "FAIL" : "PASS",
+    overall: verdict.overall,
+    note: verdict.note,
     counts: { total: items.length, blocking: blockingFindings.length },
     emptyMessage: "Sin hallazgos de seguridad en el diff."
   };
@@ -36638,7 +36687,7 @@ function render3(parsed) {
     id: `R${index + 1}`,
     label: cell(item.rule, 70),
     verdict: label(item.status),
-    evidence: cell(item.evidence, 110)
+    evidence: evidence(item.evidence, 110)
   }));
   const violations = items.filter((i) => i.status === "violated");
   const details = violations.map((violation, index) => ({
@@ -36646,10 +36695,12 @@ function render3(parsed) {
     heading: cell(violation.rule, 70),
     body: text(violation.reasoning, 400)
   }));
+  const verdict = resolveOverall(parsed.overall, violations);
   return {
     rows,
     details,
-    overall: parsed.overall === "FAIL" || violations.length > 0 ? "FAIL" : "PASS",
+    overall: verdict.overall,
+    note: verdict.note,
     counts: { total: items.length, relevant: relevant.length, violations: violations.length },
     emptyMessage: "Ninguna regla del proyecto aplica a estos cambios."
   };
@@ -36735,7 +36786,7 @@ function render4(parsed, ctx = {}) {
     id: `Q${index + 1}`,
     label: cell(item.issue, 90),
     verdict: label(item.severity),
-    evidence: cell(item.location, 60)
+    evidence: evidence(item.location, 60)
   }));
   const details = items.map((item, index) => ({
     id: `Q${index + 1}`,
@@ -36744,10 +36795,12 @@ function render4(parsed, ctx = {}) {
   }));
   const failOn = ctx.config?.failOn ?? config_default4.failOn;
   const blockingFindings = items.filter((i) => failOn.includes(i.severity));
+  const verdict = resolveOverall(parsed.overall, blockingFindings);
   return {
     rows,
     details,
-    overall: parsed.overall === "FAIL" || blockingFindings.length > 0 ? "FAIL" : "PASS",
+    overall: verdict.overall,
+    note: verdict.note,
     counts: { total: items.length, blocking: blockingFindings.length },
     emptyMessage: "Sin observaciones de calidad en el diff."
   };
@@ -36855,17 +36908,19 @@ function render5(parsed, ctx = {}) {
     id: `D${index + 1}`,
     label: cell(`${item.symbol} \u2194 ${item.existing}`, 70),
     verdict: label(item.verdict),
-    evidence: cell(`${item.location} \u2194 ${item.existingLocation}`, 90)
+    evidence: evidence(`${item.location} \u2194 ${item.existingLocation}`, 90)
   }));
   const details = duplicates.map((item, index) => ({
     id: `D${index + 1}`,
     heading: `${cell(item.symbol, 60)} (${cell(item.location, 60)}) \u2194 ${cell(item.existing, 60)} (${cell(item.existingLocation, 60)})`,
     body: text(item.recommendation, 400)
   }));
+  const verdict = resolveOverall(parsed.overall, duplicates);
   return {
     rows,
     details,
-    overall: parsed.overall === "FAIL" || duplicates.length > 0 ? "FAIL" : "PASS",
+    overall: verdict.overall,
+    note: verdict.note,
     counts: { total: items.length, duplicates: duplicates.length },
     emptyMessage: "Nada de lo que introduce el PR replica l\xF3gica que ya exista en el repositorio."
   };
@@ -36942,17 +36997,19 @@ function render6(parsed, ctx = {}) {
     id: `T${index + 1}`,
     label: cell(item.symbol, 60),
     verdict: label(item.verdict),
-    evidence: cell(item.location, 80)
+    evidence: evidence(item.location, 80)
   }));
   const details = needing.map((item, index) => ({
     id: `T${index + 1}`,
     heading: `${cell(item.symbol, 60)} (${cell(item.location, 80)})`,
     body: text(item.suggestion, 400)
   }));
+  const verdict = resolveOverall(parsed.overall, needing);
   return {
     rows,
     details,
-    overall: parsed.overall === "FAIL" || needing.length > 0 ? "FAIL" : "PASS",
+    overall: verdict.overall,
+    note: verdict.note,
     counts: { total: items.length, gaps: needing.length },
     emptyMessage: "Todo lo p\xFAblico que introduce el PR est\xE1 cubierto o no necesita test."
   };
@@ -37480,7 +37537,9 @@ async function runCheck({ inputs, env = process.env, log = console.error } = {})
     summary: result.parsed.summary ?? "",
     rows: rendered.rows,
     details: rendered.details,
-    notes,
+    // A renderer may add a note of its own — the model disagreeing with the
+    // deterministic verdict is reported, not dropped.
+    notes: rendered.note ? [...notes, rendered.note] : notes,
     emptyMessage: rendered.emptyMessage ?? "",
     meta: {
       model: config2.model,

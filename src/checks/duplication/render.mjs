@@ -11,7 +11,18 @@
 
 import promptTemplate from './prompt.md?raw';
 import config from './config.json';
-import { cell, codeFence, header, inlineValue, label, outputFormat, text, untrustedBlock } from '../shared.mjs';
+import {
+  cell,
+  codeFence,
+  evidence,
+  header,
+  inlineValue,
+  label,
+  outputFormat,
+  resolveOverall,
+  text,
+  untrustedBlock,
+} from '../shared.mjs';
 
 export const meta = {
   name: 'duplication',
@@ -130,7 +141,7 @@ export function render(parsed, ctx = {}) {
     id: `D${index + 1}`,
     label: cell(`${item.symbol} ↔ ${item.existing}`, 70),
     verdict: label(item.verdict),
-    evidence: cell(`${item.location} ↔ ${item.existingLocation}`, 90),
+    evidence: evidence(`${item.location} ↔ ${item.existingLocation}`, 90),
   }));
 
   // Only actual duplicates get prose. A pair the model cleared is information
@@ -142,10 +153,13 @@ export function render(parsed, ctx = {}) {
     body: text(item.recommendation, 400),
   }));
 
+  const verdict = resolveOverall(parsed.overall, duplicates);
+
   return {
     rows,
     details,
-    overall: parsed.overall === 'FAIL' || duplicates.length > 0 ? 'FAIL' : 'PASS',
+    overall: verdict.overall,
+    note: verdict.note,
     counts: { total: items.length, duplicates: duplicates.length },
     emptyMessage: 'Nada de lo que introduce el PR replica lógica que ya exista en el repositorio.',
   };

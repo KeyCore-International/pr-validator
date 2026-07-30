@@ -456,3 +456,39 @@ describe('cacheOptions', () => {
     expect(a.openai.promptCacheKey).not.toBe(b.openai.promptCacheKey);
   });
 });
+
+// `failOn` decides which verdicts fail a check, and it is read from the head
+// checkout. A head-side `failOn: []` disarmed it, and the only thing that stopped
+// that was every renderer honouring the model's own `overall: FAIL` — a
+// probabilistic signal propping up a deterministic gate. Now the set can only grow.
+describe('failOn can be widened by a repository, never narrowed', () => {
+  it('refuses to drop a severity the check ships with', () => {
+    const out = resolveConfig({
+      check: 'security',
+      checkConfig: { failOn: ['high'] },
+      repoConfig: { checks: { security: { failOn: [] } } },
+    });
+
+    expect(out.failOn).toContain('high');
+  });
+
+  it('lets a repository add one', () => {
+    const out = resolveConfig({
+      check: 'security',
+      checkConfig: { failOn: ['high'] },
+      repoConfig: { checks: { security: { failOn: ['medium'] } } },
+    });
+
+    expect(out.failOn).toEqual(expect.arrayContaining(['high', 'medium']));
+  });
+
+  it('does not duplicate what both declare', () => {
+    const out = resolveConfig({
+      check: 'security',
+      checkConfig: { failOn: ['high'] },
+      repoConfig: { checks: { security: { failOn: ['high'] } } },
+    });
+
+    expect(out.failOn).toEqual(['high']);
+  });
+});

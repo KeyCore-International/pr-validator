@@ -6,7 +6,17 @@
 
 import promptTemplate from './prompt.md?raw';
 import config from './config.json';
-import { cell, diffSection, header, label, outputFormat, text, untrustedBlock } from '../shared.mjs';
+import {
+  cell,
+  diffSection,
+  evidence,
+  header,
+  label,
+  outputFormat,
+  resolveOverall,
+  text,
+  untrustedBlock,
+} from '../shared.mjs';
 
 export const meta = {
   name: 'rules',
@@ -81,7 +91,7 @@ export function render(parsed) {
     id: `R${index + 1}`,
     label: cell(item.rule, 70),
     verdict: label(item.status),
-    evidence: cell(item.evidence, 110),
+    evidence: evidence(item.evidence, 110),
   }));
 
   const violations = items.filter((i) => i.status === 'violated');
@@ -91,10 +101,13 @@ export function render(parsed) {
     body: text(violation.reasoning, 400),
   }));
 
+  const verdict = resolveOverall(parsed.overall, violations);
+
   return {
     rows,
     details,
-    overall: parsed.overall === 'FAIL' || violations.length > 0 ? 'FAIL' : 'PASS',
+    overall: verdict.overall,
+    note: verdict.note,
     counts: { total: items.length, relevant: relevant.length, violations: violations.length },
     emptyMessage: 'Ninguna regla del proyecto aplica a estos cambios.',
   };

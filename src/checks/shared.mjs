@@ -35,6 +35,37 @@ export function cell(value, max = 110) {
     .slice(0, max);
 }
 
+/**
+ * An evidence cell that never cuts a path in half.
+ *
+ * `cell()` truncates by character count, which on a list of locations left things
+ * like `…AuthController.cs:172; Inm` in a published comment — a fragment that
+ * reads as a file path and is not one. Cutting on the separator and saying how
+ * many were dropped is both honest and shorter.
+ */
+export function evidence(value, max = 110) {
+  const flat = cell(value, Number.MAX_SAFE_INTEGER);
+  if (flat.length <= max) return flat;
+
+  const parts = flat.split(/\s*;\s*/).filter(Boolean);
+
+  // A single location longer than the budget: there is no separator to cut on,
+  // so trim the front of the path and keep the end, which is the useful part.
+  if (parts.length === 1) return `…${flat.slice(-(max - 1))}`;
+
+  const kept = [];
+  let used = 0;
+  for (const part of parts) {
+    // Room for what is already there, this part, and the "+N más" tail.
+    if (used + part.length + 10 > max && kept.length) break;
+    kept.push(part);
+    used += part.length + 2;
+  }
+
+  const rest = parts.length - kept.length;
+  return rest > 0 ? `${kept.join('; ')} +${rest} más` : kept.join('; ');
+}
+
 /** Bounded plain text for the `details` blocks. */
 export function text(value, max = 400) {
   return String(value ?? '').trim().slice(0, max);
@@ -165,6 +196,39 @@ export function untrustedBlock(label, content, { maxChars = 4000 } = {}) {
 <<<${MARKER_TOKEN}_BEGIN ${id}
 ${body}
 ${MARKER_TOKEN}_END ${id}>>>`;
+}
+
+/**
+ * The check's verdict, from what it found rather than from what the model felt.
+ *
+ * Every renderer used to read `parsed.overall === 'FAIL' || <something found>`,
+ * which let the model fail a check with nothing in it that the check blocks on.
+ * That is not hypothetical: a pull request was blocked over an acceptance
+ * criterion the model itself had marked MANUAL — "the diff does not prove the
+ * existing tests still pass", which is true of every diff — while `failOn` for
+ * that check is `not_met` and `partial` only.
+ *
+ * A gate that blocks for a reason it cannot name teaches people to ignore it.
+ *
+ * The disagreement is reported rather than dropped: the model saw something, and
+ * a reviewer deserves to know it did even when it does not stop the merge.
+ *
+ * @param {string} modelOverall   `parsed.overall`.
+ * @param {Array} blocking        Entries in a state this check fails on.
+ * @returns {{overall: 'PASS'|'FAIL', note: string|null}}
+ */
+export function resolveOverall(modelOverall, blocking = []) {
+  if (blocking.length > 0) return { overall: 'FAIL', note: null };
+  if (modelOverall === 'FAIL') {
+    return {
+      overall: 'PASS',
+      note:
+        'El modelo marcó el veredicto global como FAIL, pero ninguna entrada quedó en un ' +
+        'estado que este check bloquee. Se reporta como PASS y se deja constancia: revisa ' +
+        'la tabla por si hay algo que merezca atención aunque no frene el merge.',
+    };
+  }
+  return { overall: 'PASS', note: null };
 }
 
 /**

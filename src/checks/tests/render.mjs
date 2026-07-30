@@ -10,7 +10,17 @@
 
 import promptTemplate from './prompt.md?raw';
 import config from './config.json';
-import { cell, header, inlineValue, label, outputFormat, text, untrustedBlock } from '../shared.mjs';
+import {
+  cell,
+  evidence,
+  header,
+  inlineValue,
+  label,
+  outputFormat,
+  resolveOverall,
+  text,
+  untrustedBlock,
+} from '../shared.mjs';
 
 export const meta = {
   name: 'tests',
@@ -88,7 +98,7 @@ export function render(parsed, ctx = {}) {
     id: `T${index + 1}`,
     label: cell(item.symbol, 60),
     verdict: label(item.verdict),
-    evidence: cell(item.location, 80),
+    evidence: evidence(item.location, 80),
   }));
 
   // Only the symbols that need a test get prose. Explaining why the others do
@@ -99,10 +109,13 @@ export function render(parsed, ctx = {}) {
     body: text(item.suggestion, 400),
   }));
 
+  const verdict = resolveOverall(parsed.overall, needing);
+
   return {
     rows,
     details,
-    overall: parsed.overall === 'FAIL' || needing.length > 0 ? 'FAIL' : 'PASS',
+    overall: verdict.overall,
+    note: verdict.note,
     counts: { total: items.length, gaps: needing.length },
     emptyMessage: 'Todo lo público que introduce el PR está cubierto o no necesita test.',
   };

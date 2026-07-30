@@ -6,7 +6,16 @@
 
 import promptTemplate from './prompt.md?raw';
 import config from './config.json';
-import { cell, diffSection, header, label, outputFormat, text } from '../shared.mjs';
+import {
+  cell,
+  diffSection,
+  evidence,
+  header,
+  label,
+  outputFormat,
+  resolveOverall,
+  text,
+} from '../shared.mjs';
 
 export const meta = {
   name: 'security',
@@ -51,7 +60,7 @@ export function render(parsed, ctx = {}) {
     id: `S${index + 1}`,
     label: cell(item.issue, 90),
     verdict: label(item.severity),
-    evidence: cell(item.location, 60),
+    evidence: evidence(item.location, 60),
   }));
 
   // Every finding is actionable, so every finding gets its remediation — but
@@ -65,10 +74,13 @@ export function render(parsed, ctx = {}) {
   const failOn = ctx.config?.failOn ?? config.failOn;
   const blockingFindings = items.filter((i) => failOn.includes(i.severity));
 
+  const verdict = resolveOverall(parsed.overall, blockingFindings);
+
   return {
     rows,
     details,
-    overall: parsed.overall === 'FAIL' || blockingFindings.length > 0 ? 'FAIL' : 'PASS',
+    overall: verdict.overall,
+    note: verdict.note,
     counts: { total: items.length, blocking: blockingFindings.length },
     emptyMessage: 'Sin hallazgos de seguridad en el diff.',
   };

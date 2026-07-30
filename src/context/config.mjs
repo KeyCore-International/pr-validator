@@ -124,7 +124,12 @@ export function resolveConfig({ check, checkConfig = {}, repoConfig = {}, inputs
     ),
     // Severities that turn a finding into a failing check. Empty means the
     // check never fails on findings, only reports them.
-    failOn: firstDefined(perCheckRepo.failOn, checkConfig.failOn, []),
+    // Union, not override. `failOn` decides which verdicts make a check fail, so
+    // a head-side `failOn: []` was a way to disarm it — and the only thing that
+    // stopped it was every renderer honouring the model's own `overall: FAIL`.
+    // That made a probabilistic signal load-bearing for a deterministic gate.
+    // Widening the set is a legitimate way to tighten; narrowing it is not.
+    failOn: mergeFailOn(checkConfig.failOn, perCheckRepo.failOn),
     // Knobs on `duplication`'s deterministic pre-filter. Deliberately without a
     // validator-wide default: the number belongs to the check that uses it, and
     // a repository drowning in candidates can move it without the validator
@@ -138,6 +143,16 @@ export function resolveConfig({ check, checkConfig = {}, repoConfig = {}, inputs
       BOUNDS.maxCandidates,
     ),
   };
+}
+
+/**
+ * The severities that fail a check: what it ships with, plus whatever the
+ * repository adds. Never less.
+ */
+function mergeFailOn(shipped, requested) {
+  const base = Array.isArray(shipped) ? shipped : [];
+  const extra = Array.isArray(requested) ? requested : [];
+  return [...new Set([...base, ...extra])];
 }
 
 /** Like `clamp`, but keeps "nobody configured this" distinguishable from a value. */
