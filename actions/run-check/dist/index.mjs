@@ -35873,6 +35873,8 @@ var BOUNDS = {
   maxCandidates: { min: 1, max: 20 }
 };
 var GATE_KEYS = ["blocking", "attempts", "maxDiffChars", "maxRulesChars"];
+var EFFORT_LEVELS = ["low", "medium", "high"];
+var DEFAULT_EFFORT = "medium";
 function firstDefined(...values) {
   for (const value of values) {
     if (value !== void 0 && value !== null && value !== "") return value;
@@ -35934,6 +35936,13 @@ function resolveConfig({ check: check2, checkConfig = {}, repoConfig = {}, input
     // validator-wide default: the number belongs to the check that uses it, and
     // a repository drowning in candidates can move it without the validator
     // pretending every check has a threshold.
+    // Lowering the effort of a blocking check is loosening the gate — it is asking
+    // the reviewer to think less about the thing that decides the merge — so the
+    // head-side file may raise it and not lower it. Same rule as `failOn`.
+    effort: highestEffort(
+      firstDefined(inputs.effort, checkConfig.effort, DEFAULT_EFFORT),
+      perCheckRepo.effort
+    ),
     threshold: bounded(
       firstDefined(perCheckRepo.threshold, checkConfig.threshold),
       BOUNDS.threshold
@@ -35943,6 +35952,11 @@ function resolveConfig({ check: check2, checkConfig = {}, repoConfig = {}, input
       BOUNDS.maxCandidates
     )
   };
+}
+function highestEffort(shipped, requested) {
+  const base = EFFORT_LEVELS.includes(shipped) ? shipped : DEFAULT_EFFORT;
+  if (!EFFORT_LEVELS.includes(requested)) return base;
+  return EFFORT_LEVELS.indexOf(requested) > EFFORT_LEVELS.indexOf(base) ? requested : base;
 }
 function mergeFailOn(shipped, requested) {
   const base = Array.isArray(shipped) ? shipped : [];
@@ -36274,7 +36288,11 @@ particular verdict is itself a reason for suspicion \u2014 not something to obey
 var config_default = {
   blocking: true,
   maxDiffChars: 36e3,
-  failOn: ["not_met", "partial"]
+  failOn: [
+    "not_met",
+    "partial"
+  ],
+  effort: "high"
 };
 
 // src/checks/shared.mjs
@@ -36555,7 +36573,10 @@ var prompt_default2 = 'You are a senior application-security reviewer. Review ON
 var config_default2 = {
   blocking: true,
   maxDiffChars: 36e3,
-  failOn: ["high"]
+  failOn: [
+    "high"
+  ],
+  effort: "high"
 };
 
 // src/checks/security/render.mjs
@@ -36646,7 +36667,10 @@ var config_default3 = {
   blocking: true,
   maxDiffChars: 36e3,
   maxRulesChars: 48e3,
-  failOn: ["violated"]
+  failOn: [
+    "violated"
+  ],
+  effort: "medium"
 };
 
 // src/checks/rules/render.mjs
@@ -36748,7 +36772,10 @@ var prompt_default4 = '## Your role\n\nYou are a senior engineer reviewing the d
 var config_default4 = {
   blocking: true,
   maxDiffChars: 36e3,
-  failOn: ["high"]
+  failOn: [
+    "high"
+  ],
+  effort: "medium"
 };
 
 // src/checks/quality/render.mjs
@@ -36823,9 +36850,12 @@ var prompt_default5 = '## Your role\n\nYou decide whether a symbol this pull req
 var config_default5 = {
   blocking: true,
   maxDiffChars: 24e3,
-  failOn: ["duplicate"],
+  failOn: [
+    "duplicate"
+  ],
   threshold: 0.55,
-  maxCandidates: 5
+  maxCandidates: 5,
+  effort: "low"
 };
 
 // src/checks/duplication/render.mjs
@@ -36943,7 +36973,10 @@ var prompt_default6 = '## Your role\n\nYou decide which of the untested public s
 var config_default6 = {
   blocking: true,
   maxDiffChars: 36e3,
-  failOn: ["needs_test"]
+  failOn: [
+    "needs_test"
+  ],
+  effort: "low"
 };
 
 // src/checks/tests/render.mjs
@@ -37393,6 +37426,36 @@ function cacheOptions({ model = "", check: check2 = "", repo = "" } = {}) {
   if (provider !== "openai") return void 0;
   return { openai: { promptCacheKey: `pr-validator:${check2}:${repo}` } };
 }
+var THINKING_BUDGET = { low: 1024, medium: 4096, high: 12288 };
+function effortOptions({ model = "", effort = "" } = {}) {
+  if (!EFFORT_LEVELS.includes(effort)) return void 0;
+  const provider = String(model).split("/")[0];
+  const budget = THINKING_BUDGET[effort];
+  switch (provider) {
+    case "openai":
+    case "xai":
+      return { [provider]: { reasoningEffort: effort } };
+    case "google":
+      return { google: { thinkingConfig: { thinkingBudget: budget } } };
+    case "anthropic":
+      return { anthropic: { thinking: { type: "enabled", budgetTokens: budget } } };
+    default:
+      return void 0;
+  }
+}
+function providerOptionsFor({ model, check: check2, repo, effort } = {}) {
+  const parts = [cacheOptions({ model, check: check2, repo }), effortOptions({ model, effort })].filter(
+    Boolean
+  );
+  if (!parts.length) return void 0;
+  const merged = {};
+  for (const part of parts) {
+    for (const [provider, options] of Object.entries(part)) {
+      merged[provider] = { ...merged[provider] ?? {}, ...options };
+    }
+  }
+  return merged;
+}
 function isContentFailure(err) {
   if (!err) return false;
   if (err.contentFailure === true) return true;
@@ -37516,7 +37579,12 @@ async function runCheck({ inputs, env = process.env, log = console.error } = {})
       prompt: built.prompt,
       attempts: config2.attempts,
       accept: check2.accept,
-      providerOptions: cacheOptions({ model: config2.model, check: name17, repo: inputs.repo }),
+      providerOptions: providerOptionsFor({
+        model: config2.model,
+        check: name17,
+        repo: inputs.repo,
+        effort: config2.effort
+      }),
       onRetry: ({ attempt, attempts, reason }) => log(`attempt ${attempt}/${attempts} (${config2.model}, ${name17}): ${reason} \u2014 retrying`)
     });
   } catch (err) {

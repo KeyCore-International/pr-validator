@@ -10,9 +10,11 @@ import {
   rulesTruncationNote,
 } from '../src/context/rules.mjs';
 import * as rules from '../src/checks/rules/render.mjs';
-import { cacheOptions } from '../src/run-check.mjs';
+import { cacheOptions, effortOptions, providerOptionsFor } from '../src/run-check.mjs';
+import { getCheck } from '../src/checks/registry.mjs';
 import {
   BOUNDS,
+  DEFAULT_EFFORT,
   gateOverrideNotes,
   resolveConfig,
   VALIDATOR_DEFAULTS,
@@ -490,5 +492,112 @@ describe('failOn can be widened by a repository, never narrowed', () => {
     });
 
     expect(out.failOn).toEqual(['high']);
+  });
+});
+
+// Lowering the effort of a blocking check is loosening the gate: it asks the
+// reviewer to think less about the thing that decides the merge. Same rule as
+// `failOn` — a head-side file may raise it, never lower it.
+describe('effort', () => {
+  it('defaults to medium when nothing declares one', () => {
+    expect(resolveConfig({ check: 'security' }).effort).toBe(DEFAULT_EFFORT);
+  });
+
+  it('takes the level the check ships with', () => {
+    expect(resolveConfig({ check: 'security', checkConfig: { effort: 'high' } }).effort).toBe('high');
+  });
+
+  it('lets a repository raise it', () => {
+    const out = resolveConfig({
+      check: 'quality',
+      checkConfig: { effort: 'low' },
+      repoConfig: { checks: { quality: { effort: 'high' } } },
+    });
+
+    expect(out.effort).toBe('high');
+  });
+
+  it('refuses to let a repository lower it', () => {
+    const out = resolveConfig({
+      check: 'security',
+      checkConfig: { effort: 'high' },
+      repoConfig: { checks: { security: { effort: 'low' } } },
+    });
+
+    expect(out.effort).toBe('high');
+  });
+
+  // A typo must not silently move a blocking check to a level nobody chose.
+  it.each(['maximum', 'max', '', 'HIGH', 42])('ignores the unrecognised value %s', (bad) => {
+    const out = resolveConfig({
+      check: 'security',
+      checkConfig: { effort: 'medium' },
+      repoConfig: { checks: { security: { effort: bad } } },
+    });
+
+    expect(out.effort).toBe('medium');
+  });
+
+  it('ships the checks with the levels the cost study recommended', () => {
+    const at = (c) => resolveConfig({ check: c, checkConfig: getCheck(c).config }).effort;
+
+    expect([at('security'), at('criteria')]).toEqual(['high', 'high']);
+    expect([at('quality'), at('rules')]).toEqual(['medium', 'medium']);
+    expect([at('duplication'), at('tests')]).toEqual(['low', 'low']);
+  });
+});
+
+describe('effortOptions translates per provider', () => {
+  it.each([
+    ['openai/gpt-5.6-luna', 'openai'],
+    ['xai/grok-4.5', 'xai'],
+  ])('%s takes a word', (model, key) => {
+    expect(effortOptions({ model, effort: 'high' })).toEqual({ [key]: { reasoningEffort: 'high' } });
+  });
+
+  it('google takes a token budget', () => {
+    const out = effortOptions({ model: 'google/gemini-3.6-flash', effort: 'low' });
+
+    expect(out.google.thinkingConfig.thinkingBudget).toBeGreaterThan(0);
+  });
+
+  it('anthropic takes enabled plus a budget', () => {
+    const out = effortOptions({ model: 'anthropic/claude-sonnet-5', effort: 'medium' });
+
+    expect(out.anthropic.thinking.type).toBe('enabled');
+  });
+
+  // Sending an option a provider does not know risks a rejected request, and a
+  // rejected request on a merge gate is worse than the model's own default.
+  it('says nothing for a provider it has no mapping for', () => {
+    expect(effortOptions({ model: 'minimax/minimax-m3', effort: 'high' })).toBeUndefined();
+  });
+
+  it('says nothing for an effort it does not recognise', () => {
+    expect(effortOptions({ model: 'openai/x', effort: 'max' })).toBeUndefined();
+  });
+});
+
+describe('providerOptionsFor merges cache and effort under one provider key', () => {
+  it('carries both for the rules check on openai', () => {
+    const out = providerOptionsFor({
+      model: 'openai/gpt-5.6-luna',
+      check: 'rules',
+      repo: '.',
+      effort: 'medium',
+    });
+
+    expect(out.openai.promptCacheKey).toContain('rules');
+    expect(out.openai.reasoningEffort).toBe('medium');
+  });
+
+  it('carries only the effort for a check with nothing to cache', () => {
+    const out = providerOptionsFor({ model: 'openai/x', check: 'security', effort: 'high' });
+
+    expect(out).toEqual({ openai: { reasoningEffort: 'high' } });
+  });
+
+  it('is undefined when neither applies', () => {
+    expect(providerOptionsFor({ model: 'minimax/m3', check: 'security', effort: 'high' })).toBeUndefined();
   });
 });

@@ -4,6 +4,30 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/): los tags `vX.Y.Z` son inmutables
 y el tag `vX` se mueve al último release de ese major.
 
+## [4.3.0] — 2026-07-30
+
+### Añadido
+
+- **Esfuerzo de razonamiento configurable por check.** Hasta ahora cada modelo corría
+  con su effort por defecto, que ni elegíamos ni conocíamos. Se traduce a lo que cada
+  proveedor acepta —`reasoningEffort` en OpenAI y xAI, `thinkingConfig` en Google,
+  `thinking` en Anthropic— derivando la clave del prefijo del id del modelo. Un
+  proveedor sin mapeo no recibe nada: enviar una opción que no conoce arriesga una
+  petición rechazada, y eso en un gate de merge es peor que el default del modelo.
+
+  Niveles que se publican, según el estudio de costes: `security` y `criteria` en
+  **high**, `quality` y `rules` en **medium**, `duplication` y `tests` en **low** —
+  estos dos llegan con la pregunta ya resuelta por un prefiltro determinista.
+
+  Tres niveles y no cuatro: los proveedores no aceptan un `max`. Lo que Artificial
+  Analysis etiqueta «(max)» significa «el máximo de ese modelo», que es `high`.
+
+- **`effort` solo se puede subir desde el repositorio, nunca bajar.** Bajar el effort
+  de un check bloqueante es aflojar el gate — es pedirle al revisor que piense menos
+  sobre lo que decide el merge. Misma regla que `failOn`. Un valor no reconocido se
+  ignora en vez de aceptarse: un typo no debe mover un check bloqueante a un nivel
+  que nadie eligió.
+
 ## [4.2.0] — 2026-07-30
 
 Cuatro correcciones salidas de la primera corrida completa sobre un PR real.

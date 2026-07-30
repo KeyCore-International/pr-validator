@@ -1,5 +1,9 @@
 {
   "blocking": true,
   "maxDiffChars": 36000,
-  "failOn": ["not_met", "partial"]
+  "failOn": [
+    "not_met",
+    "partial"
+  ],
+  "effort": "high"
 }

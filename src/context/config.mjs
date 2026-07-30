@@ -53,6 +53,18 @@ export const BOUNDS = {
 /** Keys that decide whether the gate can fail, so a head-side file cannot relax them. */
 export const GATE_KEYS = ['blocking', 'attempts', 'maxDiffChars', 'maxRulesChars'];
 
+/**
+ * How hard the model is asked to think, lowest to highest.
+ *
+ * Three levels because that is what the providers actually expose. Artificial
+ * Analysis labels its top scores "(max)", but no API takes a `max` — it means
+ * "the highest this model offers", which is `high`.
+ */
+export const EFFORT_LEVELS = ['low', 'medium', 'high'];
+
+/** The effort a check runs at when nothing says otherwise. */
+export const DEFAULT_EFFORT = 'medium';
+
 function firstDefined(...values) {
   for (const value of values) {
     if (value !== undefined && value !== null && value !== '') return value;
@@ -134,6 +146,13 @@ export function resolveConfig({ check, checkConfig = {}, repoConfig = {}, inputs
     // validator-wide default: the number belongs to the check that uses it, and
     // a repository drowning in candidates can move it without the validator
     // pretending every check has a threshold.
+    // Lowering the effort of a blocking check is loosening the gate — it is asking
+    // the reviewer to think less about the thing that decides the merge — so the
+    // head-side file may raise it and not lower it. Same rule as `failOn`.
+    effort: highestEffort(
+      firstDefined(inputs.effort, checkConfig.effort, DEFAULT_EFFORT),
+      perCheckRepo.effort,
+    ),
     threshold: bounded(
       firstDefined(perCheckRepo.threshold, checkConfig.threshold),
       BOUNDS.threshold,
@@ -143,6 +162,16 @@ export function resolveConfig({ check, checkConfig = {}, repoConfig = {}, inputs
       BOUNDS.maxCandidates,
     ),
   };
+}
+
+/**
+ * The higher of the two efforts. An unrecognised value is ignored rather than
+ * trusted: a typo must not silently move a blocking check to a level nobody chose.
+ */
+function highestEffort(shipped, requested) {
+  const base = EFFORT_LEVELS.includes(shipped) ? shipped : DEFAULT_EFFORT;
+  if (!EFFORT_LEVELS.includes(requested)) return base;
+  return EFFORT_LEVELS.indexOf(requested) > EFFORT_LEVELS.indexOf(base) ? requested : base;
 }
 
 /**

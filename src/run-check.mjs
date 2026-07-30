@@ -16,7 +16,7 @@ import { crossWithTests } from './context/coverage.mjs';
 import { buildDuplicationContext } from './context/duplication.mjs';
 import { symbolsFromDiff } from './symbols/index.mjs';
 import { loadRules, rulesSourceNotes, rulesTruncationNote } from './context/rules.mjs';
-import { gateOverrideNotes, resolveConfig } from './context/config.mjs';
+import { EFFORT_LEVELS, gateOverrideNotes, resolveConfig } from './context/config.mjs';
 import { loadRepoConfig, perCheckSettings } from './context/repo-config.mjs';
 import { resolveTaskRef } from './context/task-ref.mjs';
 import { fetchTask } from './context/tasks-api.mjs';
@@ -292,6 +292,60 @@ export function cacheOptions({ model = '', check = '', repo = '' } = {}) {
 }
 
 /**
+ * Reasoning-budget tokens per level, for the providers that take a number instead
+ * of a word. Deliberately modest at the top: `high` should mean "think properly",
+ * not "spend without a ceiling" on a gate that runs on every push.
+ */
+const THINKING_BUDGET = { low: 1024, medium: 4096, high: 12288 };
+
+/**
+ * Translate an effort level into whatever the model's provider actually accepts.
+ *
+ * The key is not uniform across families, so it is derived from the model id:
+ * `openai/gpt-5.6-luna` and `xai/*` take a word, Google takes a token budget,
+ * Anthropic takes an enabled-plus-budget object. A provider we do not have a
+ * mapping for gets nothing — sending an option a provider does not know risks a
+ * rejected request, and a rejected request on a merge gate is worse than running
+ * at the model's own default.
+ *
+ * @returns {object|undefined} `providerOptions`, or undefined when unmappable.
+ */
+export function effortOptions({ model = '', effort = '' } = {}) {
+  if (!EFFORT_LEVELS.includes(effort)) return undefined;
+
+  const provider = String(model).split('/')[0];
+  const budget = THINKING_BUDGET[effort];
+
+  switch (provider) {
+    case 'openai':
+    case 'xai':
+      return { [provider]: { reasoningEffort: effort } };
+    case 'google':
+      return { google: { thinkingConfig: { thinkingBudget: budget } } };
+    case 'anthropic':
+      return { anthropic: { thinking: { type: 'enabled', budgetTokens: budget } } };
+    default:
+      return undefined;
+  }
+}
+
+/** Everything this run wants to tell the provider, merged per provider key. */
+export function providerOptionsFor({ model, check, repo, effort } = {}) {
+  const parts = [cacheOptions({ model, check, repo }), effortOptions({ model, effort })].filter(
+    Boolean,
+  );
+  if (!parts.length) return undefined;
+
+  const merged = {};
+  for (const part of parts) {
+    for (const [provider, options] of Object.entries(part)) {
+      merged[provider] = { ...(merged[provider] ?? {}), ...options };
+    }
+  }
+  return merged;
+}
+
+/**
  * Was this failure caused by the change under review, rather than by the world?
  *
  * Deliberately a whitelist. Guessing the other way — treating anything unknown
@@ -467,7 +521,12 @@ export async function runCheck({ inputs, env = process.env, log = console.error 
       prompt: built.prompt,
       attempts: config.attempts,
       accept: check.accept,
-      providerOptions: cacheOptions({ model: config.model, check: name, repo: inputs.repo }),
+      providerOptions: providerOptionsFor({
+        model: config.model,
+        check: name,
+        repo: inputs.repo,
+        effort: config.effort,
+      }),
       onRetry: ({ attempt, attempts, reason }) =>
         log(`attempt ${attempt}/${attempts} (${config.model}, ${name}): ${reason} — retrying`),
     });
