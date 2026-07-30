@@ -15,6 +15,7 @@ import { getCheck } from '../src/checks/registry.mjs';
 import {
   BOUNDS,
   DEFAULT_EFFORT,
+  EFFORT_LEVELS,
   gateOverrideNotes,
   resolveConfig,
   VALIDATOR_DEFAULTS,
@@ -527,8 +528,28 @@ describe('effort', () => {
     expect(out.effort).toBe('high');
   });
 
+  it('lets a repository raise a check to max', () => {
+    const out = resolveConfig({
+      check: 'quality',
+      checkConfig: { effort: 'medium' },
+      repoConfig: { checks: { quality: { effort: 'max' } } },
+    });
+
+    expect(out.effort).toBe('max');
+  });
+
+  it('refuses to lower a max check', () => {
+    const out = resolveConfig({
+      check: 'security',
+      checkConfig: { effort: 'max' },
+      repoConfig: { checks: { security: { effort: 'high' } } },
+    });
+
+    expect(out.effort).toBe('max');
+  });
+
   // A typo must not silently move a blocking check to a level nobody chose.
-  it.each(['maximum', 'max', '', 'HIGH', 42])('ignores the unrecognised value %s', (bad) => {
+  it.each(['maximum', 'xhigh', '', 'HIGH', 42])('ignores the unrecognised value %s', (bad) => {
     const out = resolveConfig({
       check: 'security',
       checkConfig: { effort: 'medium' },
@@ -541,7 +562,7 @@ describe('effort', () => {
   it('ships the checks with the levels the cost study recommended', () => {
     const at = (c) => resolveConfig({ check: c, checkConfig: getCheck(c).config }).effort;
 
-    expect([at('security'), at('criteria')]).toEqual(['high', 'high']);
+    expect([at('security'), at('criteria')]).toEqual(['max', 'max']);
     expect([at('quality'), at('rules')]).toEqual(['medium', 'medium']);
     expect([at('duplication'), at('tests')]).toEqual(['low', 'low']);
   });
@@ -567,6 +588,50 @@ describe('effortOptions translates per provider', () => {
     expect(out.anthropic.thinking.type).toBe('enabled');
   });
 
+  // Neither family has a rung above `high`; sending the literal `max` would be
+  // a rejected request, which on a merge gate reads as an outage.
+  it.each([
+    ['openai/gpt-5.6-luna', 'openai'],
+    ['xai/grok-4.5', 'xai'],
+  ])('%s resolves max down to its own top rung', (model, key) => {
+    expect(effortOptions({ model, effort: 'max' })).toEqual({ [key]: { reasoningEffort: 'high' } });
+  });
+
+  // Its scale really does have a rung above `high`, and it is where the numbers
+  // Artificial Analysis publishes for this model were measured.
+  it('deepseek keeps max as a literal, with thinking switched on', () => {
+    expect(effortOptions({ model: 'deepseek/deepseek-v4-pro', effort: 'max' })).toEqual({
+      deepseek: { thinking: { type: 'enabled' }, reasoningEffort: 'max' },
+    });
+  });
+
+  it('deepseek asks for high explicitly', () => {
+    expect(effortOptions({ model: 'deepseek/deepseek-v4-pro', effort: 'high' })).toEqual({
+      deepseek: { thinking: { type: 'enabled' }, reasoningEffort: 'high' },
+    });
+  });
+
+  // `low` and `medium` are raised to `high` server-side, so asking for them
+  // literally would make the cheap checks cost what the expensive ones cost.
+  it.each(['low', 'medium'])('deepseek takes %s as adaptive, not as a floor', (effort) => {
+    expect(effortOptions({ model: 'deepseek/deepseek-v4-pro', effort })).toEqual({
+      deepseek: { thinking: { type: 'adaptive' } },
+    });
+  });
+
+  it('every level maps to something for every provider it knows', () => {
+    for (const model of ['openai/x', 'xai/x', 'google/x', 'anthropic/x', 'deepseek/x']) {
+      for (const effort of EFFORT_LEVELS) {
+        const out = effortOptions({ model, effort });
+
+        expect(out, `${model} at ${effort}`).toBeDefined();
+        // A budget provider given an effort with no entry would send
+        // `thinkingBudget: undefined`, which is a silently wrong request.
+        expect(JSON.stringify(out), `${model} at ${effort}`).not.toContain('null');
+      }
+    }
+  });
+
   // Sending an option a provider does not know risks a rejected request, and a
   // rejected request on a merge gate is worse than the model's own default.
   it('says nothing for a provider it has no mapping for', () => {
@@ -574,7 +639,7 @@ describe('effortOptions translates per provider', () => {
   });
 
   it('says nothing for an effort it does not recognise', () => {
-    expect(effortOptions({ model: 'openai/x', effort: 'max' })).toBeUndefined();
+    expect(effortOptions({ model: 'openai/x', effort: 'xhigh' })).toBeUndefined();
   });
 });
 

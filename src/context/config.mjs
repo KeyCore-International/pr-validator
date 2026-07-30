@@ -56,11 +56,19 @@ export const GATE_KEYS = ['blocking', 'attempts', 'maxDiffChars', 'maxRulesChars
 /**
  * How hard the model is asked to think, lowest to highest.
  *
- * Three levels because that is what the providers actually expose. Artificial
- * Analysis labels its top scores "(max)", but no API takes a `max` — it means
- * "the highest this model offers", which is `high`.
+ * A level is an intent — "the most this model gives" — not a wire value.
+ * `effortOptions` is what turns it into whatever the provider accepts, and the
+ * providers do not agree: OpenAI and xAI stop at `high`, so `max` resolves to
+ * `high` there, while DeepSeek's reasoning models take `max` as a literal value
+ * distinct from `high`.
+ *
+ * `max` exists because that last case is real. The earlier note here said no API
+ * took a `max` and that Artificial Analysis' "(max)" label just meant `high`;
+ * that was wrong for DeepSeek, whose published scores are at a rung this scale
+ * could not express — so a model was being compared at one effort and run at
+ * another.
  */
-export const EFFORT_LEVELS = ['low', 'medium', 'high'];
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'max'];
 
 /** The effort a check runs at when nothing says otherwise. */
 export const DEFAULT_EFFORT = 'medium';

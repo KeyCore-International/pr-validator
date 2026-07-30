@@ -4,6 +4,40 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/): los tags `vX.Y.Z` son inmutables
 y el tag `vX` se mueve al último release de ese major.
 
+## [4.4.0] — 2026-07-30
+
+### Añadido
+
+- **Un cuarto nivel de effort, `max`, y traducción de DeepSeek.** El nivel es una
+  intención —«el techo de este modelo»— y no un valor de protocolo: en OpenAI y xAI
+  resuelve a `high`, que es su escalón más alto, y en DeepSeek pide el `max` literal,
+  que existe y es distinto de `high`.
+
+  `security` y `criteria` pasan de `high` a `max`. Con el modelo actual no cambia
+  nada —resuelve al mismo `high`— así que ningún repositorio consumidor ve una
+  diferencia hasta que apunte a un modelo que ofrezca más.
+
+- **DeepSeek enciende el razonamiento explícitamente.** Es la trampa de este
+  proveedor: `reasoningEffort` por sí solo no hace nada mientras `thinking` está
+  apagado, y apagado es el default. La opción viajaba y era inerte.
+
+  Y su escala propia es solo `high` y `max`: `low` y `medium` se suben a `high` del
+  lado del servidor. Pedirlos literalmente haría que `duplication` y `tests` —que
+  llegan con la pregunta ya resuelta por un prefiltro determinista— costaran lo que
+  cuestan los checks caros. Se traducen a `adaptive`, que deja al modelo gastar solo
+  donde la pregunta lo justifique.
+
+### Corregido
+
+- **La nota de 4.3.0 sobre `max` era falsa.** Decía que ningún proveedor acepta un
+  `max` y que la etiqueta «(max)» de Artificial Analysis solo significaba `high`.
+  Para DeepSeek no: sus cifras publicadas están medidas en un escalón que esta
+  escala no sabía expresar, así que el modelo se comparaba a un esfuerzo y se
+  ejecutaba a otro.
+
+  Si el nivel llegó al proveedor se comprueba en el pie del comentario: el campo
+  `de razonamiento`. En cero significa que la opción no llegó.
+
 ## [4.3.1] — 2026-07-30
 
 ### Corregido

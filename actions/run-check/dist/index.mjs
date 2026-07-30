@@ -35873,7 +35873,7 @@ var BOUNDS = {
   maxCandidates: { min: 1, max: 20 }
 };
 var GATE_KEYS = ["blocking", "attempts", "maxDiffChars", "maxRulesChars"];
-var EFFORT_LEVELS = ["low", "medium", "high"];
+var EFFORT_LEVELS = ["low", "medium", "high", "max"];
 var DEFAULT_EFFORT = "medium";
 function firstDefined(...values) {
   for (const value of values) {
@@ -36292,7 +36292,7 @@ var config_default = {
     "not_met",
     "partial"
   ],
-  effort: "high"
+  effort: "max"
 };
 
 // src/checks/shared.mjs
@@ -36576,7 +36576,7 @@ var config_default2 = {
   failOn: [
     "high"
   ],
-  effort: "high"
+  effort: "max"
 };
 
 // src/checks/security/render.mjs
@@ -37426,7 +37426,7 @@ function cacheOptions({ model = "", check: check2 = "", repo = "" } = {}) {
   if (provider !== "openai") return void 0;
   return { openai: { promptCacheKey: `pr-validator:${check2}:${repo}` } };
 }
-var THINKING_BUDGET = { low: 1024, medium: 4096, high: 12288 };
+var THINKING_BUDGET = { low: 1024, medium: 4096, high: 12288, max: 24576 };
 function effortOptions({ model = "", effort = "" } = {}) {
   if (!EFFORT_LEVELS.includes(effort)) return void 0;
   const provider = String(model).split("/")[0];
@@ -37434,11 +37434,13 @@ function effortOptions({ model = "", effort = "" } = {}) {
   switch (provider) {
     case "openai":
     case "xai":
-      return { [provider]: { reasoningEffort: effort } };
+      return { [provider]: { reasoningEffort: effort === "max" ? "high" : effort } };
     case "google":
       return { google: { thinkingConfig: { thinkingBudget: budget } } };
     case "anthropic":
       return { anthropic: { thinking: { type: "enabled", budgetTokens: budget } } };
+    case "deepseek":
+      return effort === "high" || effort === "max" ? { deepseek: { thinking: { type: "enabled" }, reasoningEffort: effort } } : { deepseek: { thinking: { type: "adaptive" } } };
     default:
       return void 0;
   }

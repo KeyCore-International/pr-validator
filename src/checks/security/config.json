@@ -4,5 +4,5 @@
   "failOn": [
     "high"
   ],
-  "effort": "high"
+  "effort": "max"
 }
