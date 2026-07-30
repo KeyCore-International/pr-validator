@@ -33,7 +33,7 @@ export function buildPrompt(ctx) {
     '',
     diffSection(diff, { base, head }),
     '',
-    outputFormat(JSON_SHAPE, INSTRUCTION),
+    outputFormat(JSON_SHAPE, INSTRUCTION, { detail: { field: 'recommendation' } }),
   ].join('\n');
 
   return { system: promptTemplate, prompt };

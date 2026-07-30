@@ -6,6 +6,7 @@ import * as quality from '../src/checks/quality/render.mjs';
 import * as duplication from '../src/checks/duplication/render.mjs';
 import * as tests from '../src/checks/tests/render.mjs';
 import { getCheck, listChecks, sortChecks, UnknownCheckError } from '../src/checks/registry.mjs';
+import { outputFormat } from '../src/checks/shared.mjs';
 import {
   CRITERIA_WITH_GAPS,
   RULES_WITH_VIOLATION,
@@ -330,7 +331,7 @@ describe('prompt hygiene', () => {
     const built = check.buildPrompt(ctx);
 
     expect(built.prompt).toContain('Return ONLY a single JSON object');
-    expect(built.prompt).toContain('Do not quote the diff back');
+    expect(built.prompt).toContain('Never quote the diff back');
     expect(built.system.length).toBeGreaterThan(80);
   });
 });
@@ -539,5 +540,82 @@ describe('tests render', () => {
 
     expect(built.prompt).toContain('EvaluateAsync');
     expect(built.prompt).toContain('src/Svc.cs:12');
+  });
+});
+
+// Output tokens are 12% of what we send and 46% of what we pay. Four of the six
+// checks were paying for prose that `render()` then discarded: an explanation is
+// only ever published for entries that need fixing.
+describe('outputFormat asks for prose only where it will be published', () => {
+  it('names the actionable field and when it is owed', () => {
+    const out = outputFormat('{}', 'inst', {
+      detail: { field: 'reasoning', when: '"status" is "violated"' },
+    });
+
+    expect(out).toContain('"reasoning" is the only text the developer reads');
+    expect(out).toContain('ONLY for entries where "status" is "violated"');
+    expect(out).toContain('Omit "reasoning" entirely on every other entry');
+  });
+
+  // On `security` and `quality` a finding only exists when something is wrong, so
+  // every one of them owes its remediation. Telling the model to omit it "on other
+  // entries" there would be a instruction with no referent.
+  it('asks for it on every entry when every entry is actionable', () => {
+    const out = outputFormat('{}', 'inst', { detail: { field: 'recommendation' } });
+
+    expect(out).toContain('for every entry you report');
+    expect(out).not.toContain('Omit "recommendation"');
+  });
+
+  // The saving must never come out of the failure description — that is the one
+  // thing a developer reads to fix the problem.
+  it('still asks for a specific, actionable explanation', () => {
+    const out = outputFormat('{}', 'inst', { detail: { field: 'recommendation' } });
+
+    expect(out).toContain('the concrete change that resolves it');
+    expect(out).toContain('under 300 characters');
+  });
+
+  it('drops the summary on a pass', () => {
+    expect(outputFormat('{}', 'inst')).toContain(
+      'only when "overall" is "FAIL"',
+    );
+  });
+
+  it('works without a detail spec', () => {
+    const out = outputFormat('{}', 'inst');
+
+    expect(out).toContain('## Output format');
+    expect(out).not.toContain('the only text the developer reads');
+  });
+});
+
+describe('every check declares which field is the actionable one', () => {
+  const buildFor = (name) =>
+    getCheck(name).buildPrompt({
+      ...BASE_CTX,
+      task: { criteriaBlock: '- uno' },
+      rules: { empty: false, text: '### a.md\nregla' },
+      coverage: {
+        orphans: [
+          { name: 'Nuevo', kind: 'method', path: 'src/a.cs', line: 3, signature: 'public void Nuevo()' },
+        ],
+      },
+      duplication: DUPLICATION_CTX,
+    });
+
+  const CHECKS = {
+    criteria: 'reasoning',
+    security: 'recommendation',
+    rules: 'reasoning',
+    quality: 'recommendation',
+    duplication: 'recommendation',
+    tests: 'suggestion',
+  };
+
+  it.each(Object.entries(CHECKS))('%s asks for "%s"', (name, field) => {
+    const built = buildFor(name);
+
+    expect(built.prompt).toContain(`"${field}" is the only text the developer reads`);
   });
 });

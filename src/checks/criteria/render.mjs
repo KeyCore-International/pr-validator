@@ -134,7 +134,7 @@ export function buildPrompt(ctx) {
     '',
     diffSection(diff, { base, head }),
     '',
-    outputFormat(JSON_SHAPE, instruction),
+    outputFormat(JSON_SHAPE, instruction, { detail: { field: 'reasoning', when: '"verdict" is "not_met" or "partial"' } }),
   ]
     .filter((part) => part !== '')
     .join('\n');

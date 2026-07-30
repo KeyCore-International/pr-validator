@@ -36282,12 +36282,23 @@ function cell(value, max = 110) {
 function text(value, max = 400) {
   return String(value ?? "").trim().slice(0, max);
 }
-function outputFormat(jsonShape, instruction) {
-  return `## Output format
-Return ONLY a single JSON object \u2014 no markdown fences, no prose before or after \u2014 with this exact shape:
-${jsonShape}
-${instruction}
-Be concise: at most 10 entries, each string under 300 characters, summary under 500. Do not quote the diff back.`;
+function outputFormat(jsonShape, instruction, { detail } = {}) {
+  const lines = [
+    "## Output format",
+    "Return ONLY a single JSON object \u2014 no markdown fences, no prose before or after \u2014 with this exact shape:",
+    jsonShape,
+    instruction
+  ];
+  if (detail) {
+    const scope = detail.when ? `ONLY for entries where ${detail.when}` : "for every entry you report";
+    lines.push(
+      `"${detail.field}" is the only text the developer reads in order to fix this. Write it ${scope}: name what is wrong and the concrete change that resolves it, under 300 characters.${detail.when ? ` Omit "${detail.field}" entirely on every other entry \u2014 it is discarded.` : ""}`
+    );
+  }
+  lines.push(
+    'Everything else stays short: labels under 80 characters, at most 10 entries. Write "summary" only when "overall" is "FAIL", as a single line; omit it on a pass. Never quote the diff back.'
+  );
+  return lines.join("\n");
 }
 function header({ taskId, head, base, repo, task = null, source = null }) {
   const lines = [
@@ -36423,7 +36434,7 @@ ${task.description || "(no description beyond the title)"}`;
     "",
     diffSection(diff, { base, head }),
     "",
-    outputFormat(JSON_SHAPE, instruction)
+    outputFormat(JSON_SHAPE, instruction, { detail: { field: "reasoning", when: '"verdict" is "not_met" or "partial"' } })
   ].filter((part) => part !== "").join("\n");
   return { system: prompt_default, prompt };
 }
@@ -36518,7 +36529,7 @@ function buildPrompt2(ctx) {
     "",
     diffSection(diff, { base, head }),
     "",
-    outputFormat(JSON_SHAPE2, INSTRUCTION)
+    outputFormat(JSON_SHAPE2, INSTRUCTION, { detail: { field: "recommendation" } })
   ].join("\n");
   return { system: prompt_default2, prompt };
 }
@@ -36611,7 +36622,7 @@ function buildPrompt3(ctx) {
     "",
     diffSection(diff, { base, head }),
     "",
-    outputFormat(JSON_SHAPE3, INSTRUCTION2)
+    outputFormat(JSON_SHAPE3, INSTRUCTION2, { detail: { field: "reasoning", when: '"status" is "violated"' } })
   ].join("\n");
   return { system: prompt_default3, prompt };
 }
@@ -36710,7 +36721,7 @@ function buildPrompt4(ctx) {
     "",
     diffSection(diff, { base, head }),
     "",
-    outputFormat(JSON_SHAPE4, INSTRUCTION3)
+    outputFormat(JSON_SHAPE4, INSTRUCTION3, { detail: { field: "recommendation" } })
   ].filter((part) => part !== "").join("\n");
   return { system: prompt_default4, prompt };
 }
@@ -36828,7 +36839,7 @@ function buildPrompt5(ctx) {
     `## Diff stat (${base}...${head})
 ${diff?.stat || "(no changes)"}`,
     "",
-    outputFormat(JSON_SHAPE5, INSTRUCTION4)
+    outputFormat(JSON_SHAPE5, INSTRUCTION4, { detail: { field: "recommendation", when: '"verdict" is "duplicate"' } })
   ].filter((part) => part !== "").join("\n");
   return { system: prompt_default5, prompt };
 }
@@ -36915,7 +36926,7 @@ function buildPrompt6(ctx) {
     `## Diff (${base}...${head})${diff.truncated ? " [TRUNCATED]" : ""}
 ${diff.block}`,
     "",
-    outputFormat(JSON_SHAPE6, INSTRUCTION5)
+    outputFormat(JSON_SHAPE6, INSTRUCTION5, { detail: { field: "suggestion", when: '"verdict" is "needs_test"' } })
   ].filter((part) => part !== "").join("\n");
   return { system: prompt_default6, prompt };
 }

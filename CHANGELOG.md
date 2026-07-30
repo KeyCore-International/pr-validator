@@ -44,6 +44,27 @@ superficie pública — los `inputs` y `secrets` del workflow son los mismos.
   clave entre checks sería peor que ninguna, ya que sus system prompts difieren y
   los prefijos divergen igualmente.
 
+### Cambiado — salida del modelo
+
+- **Los checks dejan de pedir prosa que el renderizador descarta.** Cuatro de los
+  seis publicaban la explicación de una entrada **solo cuando hay algo que
+  corregir**: `rules` únicamente para reglas `violated`, `criteria` para `not_met` y
+  `partial`, `duplication` para `duplicate`, `tests` para `needs_test`. El resto se
+  generaba y se tiraba. Un PASS de `rules` sobre diez reglas pagaba diez
+  razonamientos y publicaba cero.
+
+  `outputFormat()` acepta ahora qué campo es el accionable y en qué entradas se
+  debe. El ahorro sale de **no escribirlo donde nadie lo va a leer**, nunca de una
+  explicación más pobre del fallo: el campo se pide de forma más exigente que antes
+  —«nombra qué está mal y el cambio concreto que lo resuelve»— porque es lo único
+  que el desarrollador lee para arreglarlo.
+
+- **`summary` solo cuando el veredicto es FAIL.** En una corrida que pasa duplicaba
+  lo que ya dice la tabla.
+
+Los tokens de salida son el 12% de lo que enviamos y el **46% de lo que pagamos**,
+así que lo que se le pide escribir al modelo vale más que lo que se le pide leer.
+
 ### Nota sobre lo que esto todavía no demuestra
 
 El TTL de caché de `gpt-5.6-luna` es de 30 minutos y no admite otro valor. Con

@@ -58,7 +58,7 @@ export function buildPrompt(ctx) {
     '',
     diffSection(diff, { base, head }),
     '',
-    outputFormat(JSON_SHAPE, INSTRUCTION),
+    outputFormat(JSON_SHAPE, INSTRUCTION, { detail: { field: 'reasoning', when: '"status" is "violated"' } }),
   ].join('\n');
 
   return { system: promptTemplate, prompt };

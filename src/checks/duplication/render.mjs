@@ -107,7 +107,7 @@ export function buildPrompt(ctx) {
     '',
     `## Diff stat (${base}...${head})\n${diff?.stat || '(no changes)'}`,
     '',
-    outputFormat(JSON_SHAPE, INSTRUCTION),
+    outputFormat(JSON_SHAPE, INSTRUCTION, { detail: { field: 'recommendation', when: '"verdict" is "duplicate"' } }),
   ]
     .filter((part) => part !== '')
     .join('\n');
