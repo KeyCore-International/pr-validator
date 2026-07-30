@@ -337,3 +337,53 @@ describe('a steered summary cannot restructure the comment', () => {
     expect(body).toContain('> primera línea\n> segunda línea');
   });
 });
+
+// `meta.usage` was added so cache hits and reasoning tokens could be answered from
+// our own artifacts, and then nothing rendered it: it travelled as a job output and
+// died there. Both numbers decide real money — reasoning bills as output, which is
+// where most of the bill now is, and cache hits are the only lever that lowers
+// input cost without changing what the model is asked to do.
+describe('the token breakdown reaches the comment', () => {
+  const withUsage = (usage) =>
+    renderComment({
+      verdicts: [
+        makeVerdict({
+          check: 'rules',
+          title: 'Reglas',
+          status: STATUS.PASS,
+          blocking: true,
+          meta: { model: 'openai/gpt-5.6-luna', tokens: 21000, usage },
+        }),
+      ],
+      expected: ['rules'],
+    });
+
+  it('shows cache reads and reasoning next to the total', () => {
+    const body = withUsage({ cacheRead: 12800, reasoning: 3200 });
+
+    expect(body).toContain('21000 tokens');
+    expect(body).toContain('leídos de caché');
+    expect(body).toContain('de razonamiento');
+  });
+
+  it('shows writes too, which is how paying for a cache nobody reads becomes visible', () => {
+    expect(withUsage({ cacheWrite: 9000 })).toContain('escritos en caché');
+  });
+
+  // Zero is an answer — it means the prefix is not matching — and it must render.
+  it('renders a reported zero rather than hiding it', () => {
+    expect(withUsage({ cacheRead: 0 })).toContain('0 leídos de caché');
+  });
+
+  // "No cache hits" and "this provider does not say" are different answers.
+  it('says nothing about what the provider did not report', () => {
+    const body = withUsage({ reasoning: 500 });
+
+    expect(body).toContain('de razonamiento');
+    expect(body).not.toContain('caché');
+  });
+
+  it.each([undefined, null, 'nope'])('survives a usage of %s', (usage) => {
+    expect(withUsage(usage)).toContain('Modelo: openai/gpt-5.6-luna, 21000 tokens</sub>');
+  });
+});

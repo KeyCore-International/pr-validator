@@ -64,6 +64,15 @@ var MAX_PROSE = 700;
 function prose(value, max = MAX_PROSE) {
   return String(value ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "").replace(/<(\/?)(details|summary|!--|script|style|iframe)/gi, "&lt;$1$2").replace(/-->/g, "--&gt;").trim().slice(0, max);
 }
+function usageBreakdown(usage) {
+  if (!usage || typeof usage !== "object") return "";
+  const n = (v) => Number(v).toLocaleString("es");
+  const parts = [];
+  if (Number.isFinite(usage.cacheRead)) parts.push(`${n(usage.cacheRead)} le\xEDdos de cach\xE9`);
+  if (Number.isFinite(usage.cacheWrite)) parts.push(`${n(usage.cacheWrite)} escritos en cach\xE9`);
+  if (Number.isFinite(usage.reasoning)) parts.push(`${n(usage.reasoning)} de razonamiento`);
+  return parts.length ? ` (${parts.join(", ")})` : "";
+}
 function rowsTable(rows) {
   if (!rows.length) return null;
   const lines = ["| # | Detalle | Veredicto | Evidencia |", "|---|---------|-----------|-----------|"];
@@ -93,7 +102,7 @@ function checkSection(verdict) {
   }
   if (verdict.meta?.model) {
     const tokens = verdict.meta.tokens ? `, ${verdict.meta.tokens} tokens` : "";
-    parts.push(`<sub>Modelo: ${verdict.meta.model}${tokens}</sub>`, "");
+    parts.push(`<sub>Modelo: ${verdict.meta.model}${tokens}${usageBreakdown(verdict.meta.usage)}</sub>`, "");
   }
   return parts.join("\n").trimEnd();
 }
