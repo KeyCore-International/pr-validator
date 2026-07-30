@@ -4,6 +4,24 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/): los tags `vX.Y.Z` son inmutables
 y el tag `vX` se mueve al último release de ese major.
 
+## [4.3.1] — 2026-07-30
+
+### Corregido
+
+- **El desglose de tokens ya se puede leer.** En 4.1.0 se añadió `meta.usage` con
+  lecturas y escrituras de caché y tokens de razonamiento, y **nada lo renderizaba**:
+  viajaba como job output y moría ahí. Instrumentación que nadie puede leer no
+  instrumenta nada. Ahora aparece en el pie de cada check, junto al total.
+
+  Las dos cifras deciden dinero real. El razonamiento se factura como salida, que es
+  donde está la mayor parte de la factura desde que hay effort por check; y los
+  aciertos de caché son la única palanca que baja el coste de entrada sin cambiar lo
+  que se le pide al modelo.
+
+  Un campo que el proveedor no reporta no se muestra, y un cero reportado sí:
+  «sin aciertos de caché» y «este proveedor no lo dice» son respuestas distintas, y
+  solo la primera significa que el prefijo no está haciendo match.
+
 ## [4.3.0] — 2026-07-30
 
 ### Añadido

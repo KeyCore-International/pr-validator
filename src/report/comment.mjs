@@ -86,6 +86,31 @@ function prose(value, max = MAX_PROSE) {
   );
 }
 
+/**
+ * The part of a run's token bill worth reading: cache hits and reasoning.
+ *
+ * `meta.usage` was added so those two questions could be answered from our own
+ * artifacts — and then nothing rendered it, so it travelled as a job output and
+ * died there. Instrumentation nobody can read is not instrumentation.
+ *
+ * Both numbers decide real money. Reasoning tokens bill as output, which is where
+ * most of the bill now is; cache hits are the only lever that lowers input cost
+ * without touching what the model is asked to do. A field the provider does not
+ * report stays out — "no cache hits" and "this provider does not say" are
+ * different answers and only one of them means the prefix is not matching.
+ */
+function usageBreakdown(usage) {
+  if (!usage || typeof usage !== 'object') return '';
+
+  const n = (v) => Number(v).toLocaleString('es');
+  const parts = [];
+  if (Number.isFinite(usage.cacheRead)) parts.push(`${n(usage.cacheRead)} leídos de caché`);
+  if (Number.isFinite(usage.cacheWrite)) parts.push(`${n(usage.cacheWrite)} escritos en caché`);
+  if (Number.isFinite(usage.reasoning)) parts.push(`${n(usage.reasoning)} de razonamiento`);
+
+  return parts.length ? ` (${parts.join(', ')})` : '';
+}
+
 function rowsTable(rows) {
   if (!rows.length) return null;
   const lines = ['| # | Detalle | Veredicto | Evidencia |', '|---|---------|-----------|-----------|'];
@@ -130,7 +155,7 @@ function checkSection(verdict) {
 
   if (verdict.meta?.model) {
     const tokens = verdict.meta.tokens ? `, ${verdict.meta.tokens} tokens` : '';
-    parts.push(`<sub>Modelo: ${verdict.meta.model}${tokens}</sub>`, '');
+    parts.push(`<sub>Modelo: ${verdict.meta.model}${tokens}${usageBreakdown(verdict.meta.usage)}</sub>`, '');
   }
 
   return parts.join('\n').trimEnd();
