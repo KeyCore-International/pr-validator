@@ -1,0 +1,12 @@
+import { Injectable } from '@nestjs/common'
+
+@Injectable()
+export class CatalogService {
+  constructor(private readonly repo: ItemRepository) {}
+
+  async listActive(tenantId: string, page: number): Promise<Item[]> {
+    const items = await this.repo.find({ where: { tenantId } })
+    const start = (page - 1) * 20
+    return items.filter((i) => i.active).slice(start, start + 20)
+  }
+}

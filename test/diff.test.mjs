@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { buildDiff, DiffError, isTooLargeError, truncationNote } from '../src/context/diff.mjs';
+import { budgetRank, buildDiff, DiffError, fitDiffToBudget, isTooLargeError, truncationNote } from '../src/context/diff.mjs';
+import { classifyDiffFiles } from '../src/context/files.mjs';
 import { isContentFailure } from '../src/run-check.mjs';
 import { bigFile, makeRepo } from './fixtures/repo.mjs';
 
@@ -140,5 +141,120 @@ describe('isTooLargeError', () => {
     ['nothing', null],
   ])('does not mistake %s for it', (_label, err) => {
     expect(isTooLargeError(err)).toBe(false);
+  });
+});
+
+// A branch whose production code alone nearly fills the budget used to lose its
+// last service to the docs and tests that git happened to print first, and the
+// prompt only said how many files were missing, never which.
+describe('the diff budget serves production code first and names what it leaves out', () => {
+  let repo;
+
+  beforeAll(() => {
+    repo = makeRepo({
+      featureFiles: {
+        'Api.Tests/OrdersTests.cs': bigFile(30, 'test'),
+        'Api/Services/Orders.cs': bigFile(30, 'orders'),
+        'Api/Services/Zeta.cs': bigFile(30, 'zeta'),
+        'docs/design-note.md': bigFile(30, 'doc'),
+        'pr-body.md': bigFile(30, 'body'),
+      },
+    });
+  });
+
+  afterAll(() => repo.cleanup());
+
+  it('keeps every production file and drops docs and tests before them', () => {
+    // Room for two of the five ~2 400-character sections.
+    const ctx = buildDiff({ repo: repo.dir, base: 'base', head: 'feature', maxChars: 5200 });
+
+    expect(ctx.truncated).toBe(true);
+    expect(ctx.diff).toContain('orders 29');
+    expect(ctx.diff).toContain('zeta 29');
+    expect(ctx.diff).not.toContain('test 0');
+    expect(ctx.omittedPaths).toEqual(['Api.Tests/OrdersTests.cs', 'docs/design-note.md', 'pr-body.md']);
+    expect(ctx.includedFiles + ctx.omittedFiles).toBe(ctx.totalFiles);
+    expect(ctx.partialPath).toBeNull();
+  });
+
+  it('names every omitted file in the diff body', () => {
+    const ctx = buildDiff({ repo: repo.dir, base: 'base', head: 'feature', maxChars: 5200 });
+    const marker = ctx.diff.slice(ctx.diff.lastIndexOf('[... diff truncated'));
+
+    for (const path of ctx.omittedPaths) expect(marker).toContain(path);
+    expect(marker).toContain('3 file(s) left out');
+  });
+
+  it('gives tests what production left over before docs', () => {
+    const ctx = buildDiff({ repo: repo.dir, base: 'base', head: 'feature', maxChars: 7800 });
+
+    expect(ctx.diff).toContain('test 29');
+    expect(ctx.omittedPaths).toEqual(['docs/design-note.md', 'pr-body.md']);
+  });
+
+  it('cuts the first production file short only when no file fits whole', () => {
+    const ctx = buildDiff({ repo: repo.dir, base: 'base', head: 'feature', maxChars: 1000 });
+
+    expect(ctx.partialPath).toBe('Api/Services/Orders.cs');
+    expect(ctx.diff).toContain('orders 0');
+    expect(ctx.diff).toContain('Api/Services/Orders.cs is cut short');
+    expect(ctx.omittedPaths).not.toContain('Api/Services/Orders.cs');
+    expect(ctx.includedFiles + ctx.omittedFiles).toBe(ctx.totalFiles);
+  });
+});
+
+describe('fitDiffToBudget and budgetRank', () => {
+  const section = (path, size) =>
+    `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n+${'x'.repeat(size)}\n`;
+
+  it('ranks production, then styles and locales, then tests, then everything else', () => {
+    expect(budgetRank('src/a.ts')).toBe(0);
+    expect(budgetRank('src/a.css')).toBe(1);
+    expect(budgetRank('src/locales/es.json')).toBe(1);
+    expect(budgetRank('src/a.spec.ts')).toBe(2);
+    expect(budgetRank('README.md')).toBe(3);
+    expect(budgetRank('.claude/rules/a.md')).toBe(3);
+  });
+
+  it('skips a file that does not fit and keeps walking, in git order', () => {
+    const diff = section('src/big.ts', 500) + section('src/small.ts', 10) + section('src/other.ts', 10);
+    const fit = fitDiffToBudget(diff, 300);
+
+    expect(fit.included).toEqual(['src/small.ts', 'src/other.ts']);
+    expect(fit.omitted).toEqual(['src/big.ts']);
+    expect(fit.diff.indexOf('src/small.ts')).toBeLessThan(fit.diff.indexOf('src/other.ts'));
+  });
+
+  it('leaves a diff that fits untouched', () => {
+    const diff = section('src/a.ts', 10) + section('README.md', 10);
+    expect(fitDiffToBudget(diff, 10000)).toEqual({
+      diff,
+      truncated: false,
+      included: ['src/a.ts', 'README.md'],
+      omitted: [],
+      partial: null,
+    });
+  });
+});
+
+// The default stat abbreviates a long path to `.../Services/X.cs`, and the file
+// list read from it scopes the rules: a rule for `**/Infrastructure/Services/**`
+// was dropped as out of scope for a branch that changed exactly those files.
+describe('the stat keeps full paths', () => {
+  let repo;
+  const long = 'Very.Long.Project.Name.Infrastructure/Services/Deeply/Nested/Folder/SomeQuiteLongServiceName.cs';
+
+  beforeAll(() => {
+    repo = makeRepo({ featureFiles: { [long]: 'class A {}\n' } });
+  });
+
+  afterAll(() => repo.cleanup());
+
+  it('lists the whole path, and the file list read from it matches', () => {
+    const ctx = buildDiff({ repo: repo.dir, base: 'base', head: 'feature' });
+
+    expect(ctx.stat).toContain(long);
+    expect(ctx.stat).not.toContain('.../');
+    expect(classifyDiffFiles(ctx).files).toEqual([long]);
   });
 });

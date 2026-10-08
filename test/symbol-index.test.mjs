@@ -103,17 +103,18 @@ describe('buildSymbolIndex', () => {
     expect(index.fileCount).toBe(1);
   });
 
-  // The index feeds a "does this already exist?" question, and a private helper
-  // is not something another part of the repository could have reused.
-  it('leaves non-public symbols out', () => {
+  // A private helper copied into a second file is a copy all the same, so every
+  // scope is indexed — each symbol saying which one it is.
+  it('indexes non-public symbols with their scope', () => {
     repo = makeRepo({
       baseFiles: { 'src/A.cs': 'public class A {\n  private void Hidden() { }\n}\n' },
     });
 
-    const names = buildSymbolIndex({ repo: repo.dir }).symbols.map((s) => s.name);
+    const symbols = buildSymbolIndex({ repo: repo.dir }).symbols;
+    const hidden = symbols.find((s) => s.name === 'Hidden');
 
-    expect(names).toContain('A');
-    expect(names).not.toContain('Hidden');
+    expect(symbols.map((s) => s.name)).toContain('A');
+    expect(hidden).toMatchObject({ exported: false, scope: 'private', container: 'A', span: [2, 2] });
   });
 
   it('honours the exclusion predicate', () => {

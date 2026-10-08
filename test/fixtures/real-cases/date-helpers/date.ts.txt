@@ -1,0 +1,14 @@
+import moment from "moment"
+
+/** Today, as YYYY-MM-DD. */
+export const currentDate = (): string => {
+  return moment().format("YYYY-MM-DD")
+}
+
+/** A date string in the given format, optionally with the time. */
+export const formatDate = (date: string, withTime: boolean = false, format: string = 'DD/MM/YYYY'): string => {
+  if (withTime) {
+    return moment(date).format(`${format} HH:mm:ss`)
+  }
+  return moment(date).format(format)
+}

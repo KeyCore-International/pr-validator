@@ -51,12 +51,12 @@ Guía completa en [`docs/INSTALL.md`](docs/INSTALL.md). Detalle de cada check en
 
 ### Inputs del workflow
 
-| Input | Default | Descripción |
-| --- | --- | --- |
-| `checks` | *(vacío)* | Checks a ejecutar, separados por coma. Vacío = lo que diga `.pr-validator.json`, y si no lo dice, todos |
-| `base` | `develop` | Rama base contra la que se calcula el diff |
-| `config-path` | `.pr-validator.json` | Configuración por repositorio |
-| `node-version` | `20` | Versión de Node del runner |
+| Input          | Default              | Descripción                                                                                             |
+| -------------- | -------------------- | ------------------------------------------------------------------------------------------------------- |
+| `checks`       | *(vacío)*            | Checks a ejecutar, separados por coma. Vacío = lo que diga `.pr-validator.json`, y si no lo dice, todos |
+| `base`         | `develop`            | Rama base contra la que se calcula el diff                                                              |
+| `config-path`  | `.pr-validator.json` | Configuración por repositorio                                                                           |
+| `node-version` | `20`                 | Versión de Node del runner                                                                              |
 
 ### `.pr-validator.json`
 
@@ -109,24 +109,24 @@ mergea el `.pr-validator.json` a la rama base primero.
 
 Se definen en el repositorio consumidor, o mejor a nivel de organización. **Este repositorio no contiene ningún valor secreto**; todo se lee del entorno que inyecta el consumidor.
 
-| Nombre | Tipo | Requerido | Uso |
-| --- | --- | --- | --- |
-| `AI_GATEWAY_API_KEY` | secret | Sí | Inferencia de todos los checks |
-| `TASKS_API_URL` | variable | Solo para `criteria` | URL base del gestor de tareas |
-| `TASKS_API_EMAIL` | secret | Solo para `criteria` | Cuenta de servicio de solo lectura |
-| `TASKS_API_PASSWORD` | secret | Solo para `criteria` | Contraseña de esa cuenta |
-| `PR_VALIDATOR_MODEL` | variable | Sí | Modelo que ejecuta los checks |
+| Nombre               | Tipo     | Requerido            | Uso                                |
+| -------------------- | -------- | -------------------- | ---------------------------------- |
+| `AI_GATEWAY_API_KEY` | secret   | Sí                   | Inferencia de todos los checks     |
+| `TASKS_API_URL`      | variable | Solo para `criteria` | URL base del gestor de tareas      |
+| `TASKS_API_EMAIL`    | secret   | Solo para `criteria` | Cuenta de servicio de solo lectura |
+| `TASKS_API_PASSWORD` | secret   | Solo para `criteria` | Contraseña de esa cuenta           |
+| `PR_VALIDATOR_MODEL` | variable | Sí                   | Modelo que ejecuta los checks      |
 
 ## Checks disponibles
 
-| Check | Qué evalúa | Bloquea por defecto |
-| --- | --- | --- |
-| `criteria` | Criterios de aceptación de la tarea referenciada por el PR | Sí |
-| `security` | Vulnerabilidades introducidas por el diff | Sí (severidad alta) |
-| `rules` | Convenciones que el propio repositorio documentó | Sí |
-| `quality` | Diseño: SOLID, complejidad, naming, código muerto, manejo de errores, números mágicos, idempotencia | Sí (severidad alta) |
-| `duplication` | Métodos y funciones nuevos que replican lógica ya existente | Sí |
-| `tests` | Símbolos públicos nuevos que ningún test menciona | Sí |
+| Check         | Qué evalúa                                                                                          | Bloquea por defecto |
+| ------------- | --------------------------------------------------------------------------------------------------- | ------------------- |
+| `criteria`    | Criterios de aceptación de la tarea referenciada por el PR                                          | Sí                  |
+| `security`    | Vulnerabilidades introducidas por el diff                                                           | Sí (severidad alta) |
+| `rules`       | Convenciones que el propio repositorio documentó                                                    | Sí                  |
+| `quality`     | Diseño: SOLID, complejidad, naming, código muerto, manejo de errores, números mágicos, idempotencia | Sí (severidad alta) |
+| `duplication` | Métodos y funciones nuevos que replican lógica ya existente                                         | Sí                  |
+| `tests`       | Símbolos públicos nuevos que ningún test menciona                                                   | Sí                  |
 
 Un hallazgo pertenece a **un solo check**: `quality` revisa cómo está construido el código y no reporta vulnerabilidades, que son territorio exclusivo de `security`. Si el mismo problema saliera dos veces con dos redacciones, el desarrollador tendría que decidir cuál de los dos informes es el bueno.
 
@@ -148,6 +148,22 @@ Dentro de la fuente que gana, el primer id es el que se evalúa; los demás ids 
 
 Cuando el diff no se corresponde con la tarea referenciada, el check lo dice con esas palabras en vez de listar criterios incumplidos: el problema es la referencia, no el código.
 
+## Modo local
+
+`dist/local/pr-local.mjs` es el mismo motor como CLI para correr en la máquina del desarrollador antes del push o del merge. Es un solo archivo para Node ≥20, sin dependencias, que nunca llama a un modelo ni a la red: el build falla si alcanza el SDK de IA, el gateway o el cliente del gestor de tareas.
+
+```bash
+node dist/local/pr-local.mjs facts --out /tmp/prv --base origin/develop
+node dist/local/pr-local.mjs prompts --out /tmp/prv --checks duplication,tests
+node dist/local/pr-local.mjs render --out /tmp/prv --check duplication --in respuesta.json
+```
+
+- `facts` escribe los hechos deterministas de la rama (escalón, disparadores, duplicados, homónimos, funciones con lógica sin prueba, merges ajenos) en un `facts.json` que da los mismos bytes en dos corridas.
+- `prompts` y `render` producen los prompts y los veredictos que produciría la CI.
+- `config`, `inventory` y `rules` exponen la configuración resuelta, los símbolos exportados y el corpus de reglas.
+
+Referencia completa: [docs/LOCAL.md](docs/LOCAL.md).
+
 ## Versionado
 
 Tags `vX.Y.Z` inmutables y un tag móvil `vX` que siempre apunta al último release de ese major. Fijar `@v4` recibe correcciones y mejoras automáticamente; fijar `@v4.0.0` congela la versión.
@@ -159,11 +175,11 @@ Un cambio incompatible siempre implica un major nuevo.
 ```bash
 npm install
 npm test          # vitest sobre la lógica determinista
-npm run build     # empaqueta src/ en actions/*/dist/
+npm run build     # empaqueta src/ en actions/*/dist/ y dist/local/
 npm run build:check   # verifica que los bundles correspondan a src/
 ```
 
-Los bundles de `actions/*/dist/` se commitean a propósito: GitHub ejecuta el código de la action directamente desde el repositorio. CI falla si un bundle no corresponde a su fuente.
+Los bundles de `actions/*/dist/` y `dist/local/` se commitean a propósito: GitHub ejecuta el código de la action directamente desde el repositorio. CI falla si un bundle no corresponde a su fuente.
 
 ## Licencia
 

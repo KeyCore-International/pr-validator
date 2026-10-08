@@ -1,0 +1,25 @@
+namespace Shop.Application.Services
+{
+    public class OrderService
+    {
+        public decimal Total(Order order)
+        {
+            return ApplyDiscounts(order.Lines, order.CustomerTier);
+        }
+
+        private decimal ApplyDiscounts(IEnumerable<OrderLine> lines, int tier)
+        {
+            decimal total = 0;
+            foreach (var line in lines)
+            {
+                var amount = line.Quantity * line.UnitPrice;
+                if (tier > 2 && amount > 100)
+                {
+                    amount = amount * 0.9m;
+                }
+                total += Math.Round(amount, 2);
+            }
+            return total;
+        }
+    }
+}

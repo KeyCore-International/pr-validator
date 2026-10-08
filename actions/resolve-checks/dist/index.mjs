@@ -564,7 +564,7 @@ function noRulesVerdict(rulesCtx) {
     details: [],
     overall: "PASS",
     counts: { total: 0, relevant: 0, violations: 0 },
-    emptyMessage: unreadable.length ? `El repositorio declara ${unreadable.length} archivo(s) de reglas que no se leyeron (${listed}${rest > 0 ? ` y ${rest} m\xE1s` : ""}): solo se leen archivos regulares dentro del repositorio, nunca enlaces simb\xF3licos ni rutas fuera del checkout. No qued\xF3 ninguna regla que evaluar, as\xED que este check no juzg\xF3 nada. No bloquea.` : `Sin reglas declaradas en el repositorio (${rulesCtx?.dir ?? ".claude/rules"}). No hay convenciones que exigir.`
+    emptyMessage: unreadable.length ? `El repositorio declara ${unreadable.length} archivo(s) de reglas que no se leyeron (${listed}${rest > 0 ? ` y ${rest} m\xE1s` : ""}): solo se leen archivos regulares dentro del repositorio, nunca enlaces simb\xF3licos ni rutas fuera del checkout. No qued\xF3 ninguna regla que evaluar, as\xED que este check no juzg\xF3 nada. No bloquea.` : `Sin reglas declaradas en el repositorio (${rulesCtx?.dirLabel ?? rulesCtx?.dir ?? ".claude/rules"}). No hay convenciones que exigir.`
   };
 }
 
@@ -887,7 +887,11 @@ var TOP_LEVEL_KEYS = /* @__PURE__ */ new Set([
   "model",
   "maxDiffChars",
   "maxRulesChars",
-  "checksConfig"
+  "checksConfig",
+  // Settings for running the validator on a developer's machine. The pull
+  // request run never reads them, so their contents are not validated here:
+  // the local runner owns that block and reports on it itself.
+  "local"
 ]);
 var PER_CHECK_KEYS = /* @__PURE__ */ new Set([
   "model",
@@ -899,6 +903,15 @@ var PER_CHECK_KEYS = /* @__PURE__ */ new Set([
   "threshold",
   "maxCandidates"
 ]);
+var CHECK_SPECIFIC_KEYS = {
+  // Pairs the team has already judged acceptable, and the folder of shared
+  // helpers new code is expected to reuse.
+  duplication: /* @__PURE__ */ new Set(["allow", "reference"])
+};
+function isKnownCheckKey(check, key) {
+  if (PER_CHECK_KEYS.has(key)) return true;
+  return Object.hasOwn(CHECK_SPECIFIC_KEYS, check) && CHECK_SPECIFIC_KEYS[check].has(key);
+}
 function loadRepoConfig({ repo = ".", configPath = DEFAULT_CONFIG_PATH } = {}) {
   const full = join(repo, configPath || DEFAULT_CONFIG_PATH);
   let raw;
@@ -936,7 +949,7 @@ function unknownKeyNotes(config, configPath) {
     for (const [name, settings] of Object.entries(checks)) {
       if (!settings || typeof settings !== "object") continue;
       for (const key of Object.keys(settings)) {
-        if (!PER_CHECK_KEYS.has(key)) perCheck.push(`checks.${name}.${key}`);
+        if (!isKnownCheckKey(name, key)) perCheck.push(`checks.${name}.${key}`);
       }
     }
   }

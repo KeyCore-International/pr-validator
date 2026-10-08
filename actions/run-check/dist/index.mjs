@@ -34687,1176 +34687,7 @@ var init_dist6 = __esm({
 });
 
 // src/run-check.mjs
-import { writeFileSync } from "node:fs";
-
-// src/context/diff.mjs
-import { execFileSync } from "node:child_process";
-var DEFAULT_MAX_DIFF_CHARS = 36e3;
-var DiffError = class extends Error {
-  /**
-   * @param {string} message
-   * @param {{contentFailure?: boolean}} [opts] `contentFailure` marks a failure
-   *   caused by the change under review rather than by the environment, so the
-   *   runner can block on it instead of reporting a non-blocking tool error.
-   */
-  constructor(message, { contentFailure = false } = {}) {
-    super(message);
-    this.name = "DiffError";
-    this.contentFailure = contentFailure;
-  }
-};
-function isTooLargeError(err) {
-  return err?.code === "ENOBUFS" || /maxBuffer/i.test(String(err?.message ?? ""));
-}
-function git(repo, args) {
-  return execFileSync("git", ["-C", repo, ...args], {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-    // Capture stderr instead of inheriting it: a failed fetch is handled here
-    // and must not spray git noise into the CI log as if something broke.
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-}
-function countStatFiles(stat) {
-  if (!stat) return 0;
-  const lines = stat.split("\n").filter((l) => l.trim());
-  if (!lines.length) return 0;
-  const last = lines[lines.length - 1];
-  return /\bfiles? changed\b/.test(last) ? lines.length - 1 : lines.length;
-}
-function countDiffFiles(diff) {
-  const matches = diff.match(/^diff --git /gm);
-  return matches ? matches.length : 0;
-}
-function ensureBaseRef(repo, base) {
-  const branch = base.replace(/^origin\//, "");
-  try {
-    git(repo, [
-      "fetch",
-      "--no-tags",
-      "--quiet",
-      "origin",
-      `+refs/heads/${branch}:refs/remotes/origin/${branch}`
-    ]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function buildDiff({ repo = ".", base, head = "HEAD", maxChars = DEFAULT_MAX_DIFF_CHARS } = {}) {
-  if (!base) throw new DiffError("buildDiff requires a base ref");
-  let stat;
-  let diff;
-  try {
-    stat = git(repo, ["diff", "--stat", `${base}...${head}`]).trim();
-    diff = git(repo, ["diff", `${base}...${head}`]);
-  } catch (err) {
-    const tooLarge = isTooLargeError(err);
-    throw new DiffError(
-      tooLarge ? `El diff entre ${base} y ${head} excede el m\xE1ximo que se puede leer (64 MB). Divide el PR en cambios m\xE1s peque\xF1os.` : `git diff ${base}...${head} failed: ${err.message}`,
-      { contentFailure: tooLarge }
-    );
-  }
-  const totalChars = diff.length;
-  const totalFiles = countStatFiles(stat);
-  const empty = diff.trim().length === 0;
-  let truncated = false;
-  if (totalChars > maxChars) {
-    const slice = diff.slice(0, maxChars);
-    const boundary = slice.lastIndexOf("\ndiff --git ");
-    diff = boundary > 0 ? slice.slice(0, boundary + 1) : slice;
-    diff += `
-
-[... diff truncated at ${maxChars} chars ...]`;
-    truncated = true;
-  }
-  const includedFiles = truncated ? countDiffFiles(diff) : totalFiles;
-  return {
-    stat,
-    diff,
-    block: empty ? "(empty \u2014 the branch has no changes vs base)" : "```diff\n" + diff + "\n```",
-    empty,
-    truncated,
-    totalChars,
-    totalFiles,
-    includedFiles,
-    omittedFiles: Math.max(0, totalFiles - includedFiles)
-  };
-}
-function truncationNote(diffCtx) {
-  if (!diffCtx.truncated) return null;
-  const omitted = diffCtx.omittedFiles;
-  const scope = omitted > 0 ? `${omitted} de ${diffCtx.totalFiles} archivos quedaron fuera` : "el \xFAltimo archivo qued\xF3 incompleto";
-  return `Diff truncado en ${diffCtx.diff.length} de ${diffCtx.totalChars} caracteres: ${scope}. La revisi\xF3n es parcial.`;
-}
-
-// src/context/files.mjs
-import { lstatSync, realpathSync } from "node:fs";
-import { isAbsolute, relative, sep } from "node:path";
-function isRegularFileWithin(path, root) {
-  try {
-    if (!lstatSync(path).isFile()) return false;
-    const relativePath = relative(realpathSync(root), realpathSync(path));
-    return relativePath !== "" && !isAbsolute(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep}`);
-  } catch {
-    return false;
-  }
-}
-var NON_CODE_EXTENSION = /\.(md|markdown|txt|rst|adoc|png|jpe?g|gif|svg|webp|ico|bmp|pdf|woff2?|ttf|eot|mp4|mov|zip|gz)$/i;
-var NON_CODE_NAME = /^(LICENSE|NOTICE|AUTHORS|CODEOWNERS|\.gitattributes|\.gitignore)$/i;
-function filesFromStat(stat) {
-  const out = [];
-  for (const line of String(stat || "").split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || /\bfiles?\s+changed\b/.test(trimmed)) continue;
-    const separator = trimmed.lastIndexOf("|");
-    if (separator === -1) continue;
-    let path = trimmed.slice(0, separator).trim();
-    if (!path) continue;
-    const rename = path.match(/^(.*)\{.*=>\s*(.*?)\}(.*)$/);
-    if (rename) path = `${rename[1]}${rename[2]}${rename[3]}`.replace(/\/{2,}/g, "/");
-    out.push(path.trim());
-  }
-  return out;
-}
-function isCodeFile(path) {
-  const name17 = String(path || "").split("/").pop() ?? "";
-  if (!name17) return false;
-  if (NON_CODE_NAME.test(name17)) return false;
-  return !NON_CODE_EXTENSION.test(name17);
-}
-function classifyDiffFiles(diffCtx) {
-  const files = filesFromStat(diffCtx?.stat);
-  const code = files.filter(isCodeFile);
-  return {
-    files,
-    code,
-    nonCode: files.filter((path) => !isCodeFile(path)),
-    // An empty diff has no code, but it is already short-circuited earlier as
-    // "no changes"; saying `false` here keeps this function honest either way.
-    hasCode: code.length > 0
-  };
-}
-
-// src/context/coverage.mjs
-import { execFileSync as execFileSync2 } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-var TEST_FILE = /(\.|_)(test|spec)\.[a-z]+$|Tests?\.(cs|php|java|kt)$|(^|\/)(tests?|__tests__|spec)\//i;
-var MAX_TEST_FILE_CHARS = 2e5;
-function git2(repo, args) {
-  return execFileSync2("git", ["-C", repo, ...args], {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-}
-function findTestFiles(repo = ".") {
-  let listing;
-  try {
-    listing = git2(repo, ["ls-files", "--cached", "--others", "--exclude-standard"]);
-  } catch {
-    return [];
-  }
-  return listing.split("\n").map((line) => line.trim()).filter(Boolean).filter((path) => TEST_FILE.test(path));
-}
-function readTestCorpus(repo, files) {
-  const corpus = [];
-  let refused = 0;
-  for (const path of files) {
-    const full = join(repo, path);
-    if (!isRegularFileWithin(full, repo)) {
-      refused += 1;
-      continue;
-    }
-    try {
-      corpus.push(readFileSync(full, "utf8").slice(0, MAX_TEST_FILE_CHARS));
-    } catch {
-    }
-  }
-  return { text: corpus.join("\n"), refused };
-}
-function crossWithTests({ symbols = [], repo = "." } = {}) {
-  const testFiles = findTestFiles(repo);
-  if (!testFiles.length) {
-    return { hasTestSuite: false, testFileCount: 0, refusedTestFiles: 0, covered: [], orphans: [] };
-  }
-  const { text: corpus, refused } = readTestCorpus(repo, testFiles);
-  const covered = [];
-  const orphans = [];
-  for (const symbol19 of symbols) {
-    const mentioned = new RegExp(`\\b${escapeRegExp(symbol19.name)}\\b`).test(corpus);
-    (mentioned ? covered : orphans).push(symbol19);
-  }
-  return {
-    hasTestSuite: true,
-    testFileCount: testFiles.length,
-    refusedTestFiles: refused,
-    covered,
-    orphans
-  };
-}
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// src/context/symbol-index.mjs
-import { execFileSync as execFileSync3 } from "node:child_process";
-import { readFileSync as readFileSync2, statSync } from "node:fs";
-import { join as join2 } from "node:path";
-
-// src/symbols/limits.mjs
-var MAX_NAME_CHARS = 200;
-
-// src/symbols/csharp.mjs
-var TYPE = /^\s*(?:\[[^\]]*\]\s*)*(public|internal|protected)\s+(?:(?:abstract|sealed|static|partial|readonly|ref)\s+)*(class|record|interface|struct|enum)\s+([A-Za-z_]\w*)/;
-var METHOD = /^\s*(?:\[[^\]]*\]\s*)*(public|internal|protected)\s+(?:(?:static|virtual|override|abstract|sealed|async|extern|new|partial|unsafe)\s+)*([A-Za-z_][\w<>,.\[\]?]*)\s+([A-Za-z_]\w*)\s*(\([^;]*)?$/;
-var PROPERTY = /^\s*(?:\[[^\]]*\]\s*)*(?:public|internal|protected)\b[^(;]*\{\s*get\b/;
-var KIND_FOR = { class: "class", record: "class", struct: "class", interface: "interface", enum: "enum" };
-function extract(lines) {
-  const out = [];
-  for (const { line, text: text3 } of lines) {
-    if (PROPERTY.test(text3)) continue;
-    const type = text3.match(TYPE);
-    if (type) {
-      out.push({
-        name: type[3].slice(0, MAX_NAME_CHARS),
-        kind: KIND_FOR[type[2]] ?? "class",
-        line,
-        signature: text3.trim().slice(0, 200),
-        exported: type[1] === "public"
-      });
-      continue;
-    }
-    const method = text3.match(METHOD);
-    if (method && method[4]) {
-      out.push({
-        name: method[3].slice(0, MAX_NAME_CHARS),
-        kind: "method",
-        line,
-        signature: text3.trim().slice(0, 200),
-        exported: method[1] === "public"
-      });
-    }
-  }
-  return out;
-}
-
-// src/symbols/typescript.mjs
-var EXPORTED = /^\s*export\s+(?:default\s+)?/;
-var FUNCTION = /^\s*export\s+(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*[(<]/;
-var CLASS = /^\s*export\s+(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/;
-var INTERFACE = /^\s*export\s+(?:interface|type)\s+([A-Za-z_$][\w$]*)/;
-var ENUM = /^\s*export\s+(?:const\s+)?enum\s+([A-Za-z_$][\w$]*)/;
-var ARROW = /^\s*export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::[^=]+)?=>|^\s*export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\b/;
-var FACTORY_CALL = /^\s*export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:defineStore|defineComponent|createStore)\s*\(/;
-var PATTERNS = [
-  [FUNCTION, "function"],
-  [CLASS, "class"],
-  [INTERFACE, "interface"],
-  [ENUM, "enum"],
-  [FACTORY_CALL, "function"],
-  [ARROW, "function"]
-];
-function extract2(lines) {
-  const out = [];
-  for (const { line, text: text3 } of lines) {
-    if (!EXPORTED.test(text3)) continue;
-    for (const [pattern, kind] of PATTERNS) {
-      const match = text3.match(pattern);
-      if (!match) continue;
-      const name17 = match[1] ?? match[2];
-      if (!name17) continue;
-      out.push({
-        name: name17.slice(0, MAX_NAME_CHARS),
-        kind,
-        line,
-        signature: text3.trim().slice(0, 200),
-        exported: true
-      });
-      break;
-    }
-  }
-  return out;
-}
-
-// src/symbols/vue.mjs
-function componentNameFromPath(path) {
-  const file2 = String(path || "").split("/").pop() ?? "";
-  const base = file2.replace(/\.vue$/i, "");
-  if (!base) return "";
-  return base.split(/[-_.]/).filter(Boolean).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("");
-}
-function extract3(lines, path = "") {
-  const name17 = componentNameFromPath(path).slice(0, MAX_NAME_CHARS);
-  const out = [];
-  if (name17 && lines.length) {
-    out.push({
-      name: name17,
-      kind: "component",
-      line: lines[0].line,
-      signature: `<${name17} />`,
-      exported: true
-    });
-  }
-  out.push(...extract2(lines));
-  return out;
-}
-
-// src/symbols/php.mjs
-var TYPE2 = /^\s*(?:(?:final|abstract|readonly)\s+)*(class|interface|trait|enum)\s+([A-Za-z_]\w*)/;
-var METHOD2 = /^\s*(?:(?:final|abstract|static)\s+)*(?:(public|protected|private)\s+)?(?:(?:final|abstract|static)\s+)*function\s+&?\s*([A-Za-z_]\w*)\s*\(/;
-var KIND_FOR2 = { class: "class", interface: "interface", trait: "class", enum: "enum" };
-var MAGIC = /^__/;
-function extract4(lines) {
-  const out = [];
-  for (const { line, text: text3 } of lines) {
-    const type = text3.match(TYPE2);
-    if (type) {
-      out.push({
-        name: type[2].slice(0, MAX_NAME_CHARS),
-        kind: KIND_FOR2[type[1]] ?? "class",
-        line,
-        signature: text3.trim().slice(0, 200),
-        exported: true
-      });
-      continue;
-    }
-    const method = text3.match(METHOD2);
-    if (!method || MAGIC.test(method[2])) continue;
-    const visibility = method[1] ?? "public";
-    if (visibility === "private") continue;
-    out.push({
-      name: method[2].slice(0, MAX_NAME_CHARS),
-      kind: "method",
-      line,
-      signature: text3.trim().slice(0, 200),
-      exported: visibility === "public"
-    });
-  }
-  return out;
-}
-
-// src/symbols/index.mjs
-var EXTRACTORS = [
-  [/\.cs$/i, extract],
-  [/\.vue$/i, extract3],
-  [/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i, extract2],
-  [/\.php$/i, extract4]
-];
-function extractorFor(path) {
-  for (const [pattern, extractor] of EXTRACTORS) {
-    if (pattern.test(String(path || ""))) return extractor;
-  }
-  return null;
-}
-function addedLinesByFile(diffText) {
-  const byFile = /* @__PURE__ */ new Map();
-  let path = null;
-  let lineNumber = 0;
-  let inHunk = false;
-  for (const raw of String(diffText || "").split("\n")) {
-    if (raw.startsWith("diff --git ")) {
-      path = null;
-      inHunk = false;
-      continue;
-    }
-    const fileHeader = inHunk ? null : raw.match(/^\+\+\+ b\/(.+)$/);
-    if (fileHeader) {
-      path = fileHeader[1] === "dev/null" ? null : fileHeader[1];
-      continue;
-    }
-    const hunk = raw.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-    if (hunk) {
-      lineNumber = Number(hunk[1]);
-      inHunk = true;
-      continue;
-    }
-    if (!path) continue;
-    if (raw.startsWith("+")) {
-      const list = byFile.get(path) ?? [];
-      list.push({ line: lineNumber, text: raw.slice(1) });
-      byFile.set(path, list);
-      lineNumber += 1;
-    } else if (raw.startsWith("-") || raw.startsWith("\\")) {
-    } else if (raw.startsWith(" ")) {
-      lineNumber += 1;
-    }
-  }
-  return byFile;
-}
-function symbolsFromDiff(diffText) {
-  const out = [];
-  for (const [path, lines] of addedLinesByFile(diffText)) {
-    const extractor = extractorFor(path);
-    if (!extractor) continue;
-    for (const symbol19 of extractor(lines, path)) {
-      if (symbol19.exported) out.push({ ...symbol19, path });
-    }
-  }
-  return out;
-}
-
-// src/context/symbol-index.mjs
-var MAX_INDEXED_FILES = 4e3;
-var MAX_FILE_CHARS = 4e5;
-var MAX_INDEXED_SYMBOLS = 12e4;
-var MAX_BODY_LINES = 40;
-var MAX_BODY_CHARS = 16e3;
-function git3(repo, args) {
-  return execFileSync3("git", ["-C", repo, ...args], {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-}
-function indexableFiles(repo = ".") {
-  let listing;
-  try {
-    listing = git3(repo, ["ls-files", "--cached", "--others", "--exclude-standard"]);
-  } catch {
-    return [];
-  }
-  return listing.split("\n").map((line) => line.trim()).filter(Boolean).filter((path) => extractorFor(path) !== null);
-}
-function bodyLines(lines, startIndex, maxLines = MAX_BODY_LINES, maxChars = MAX_BODY_CHARS) {
-  const collected = [];
-  let depth = 0;
-  let opened = false;
-  let used = 0;
-  for (let i = startIndex; i < lines.length && collected.length < maxLines && used < maxChars; i += 1) {
-    const room = maxChars - used;
-    const whole = lines[i];
-    const line = whole.length > room ? whole.slice(0, room) : whole;
-    collected.push(line);
-    used += line.length;
-    for (const char of line) {
-      if (char === "{") {
-        depth += 1;
-        opened = true;
-      } else if (char === "}") {
-        depth -= 1;
-      }
-    }
-    if (opened) {
-      if (depth <= 0) break;
-      continue;
-    }
-    const trimmed = line.trim();
-    if (trimmed.endsWith(";") || trimmed === "") break;
-  }
-  return collected;
-}
-function buildSymbolIndex({ repo = ".", exclude = () => false } = {}) {
-  const all = indexableFiles(repo);
-  const files = all.filter((path) => !exclude(path));
-  const truncated = files.length > MAX_INDEXED_FILES;
-  const selected = truncated ? files.slice(0, MAX_INDEXED_FILES) : files;
-  const symbols = [];
-  let read = 0;
-  let skipped = all.length - selected.length;
-  let symbolsTruncated = false;
-  for (const path of selected) {
-    const full = join2(repo, path);
-    if (!isRegularFileWithin(full, repo)) {
-      skipped += 1;
-      continue;
-    }
-    try {
-      if (statSync(full).size > MAX_FILE_CHARS) {
-        skipped += 1;
-        continue;
-      }
-    } catch {
-      skipped += 1;
-      continue;
-    }
-    let content;
-    try {
-      content = readFileSync2(full, "utf8");
-    } catch {
-      continue;
-    }
-    if (content.length > MAX_FILE_CHARS) continue;
-    read += 1;
-    const extractor = extractorFor(path);
-    const rawLines = content.split("\n");
-    const numbered = rawLines.map((text3, index) => ({ line: index + 1, text: text3 }));
-    for (const symbol19 of extractor(numbered, path)) {
-      if (!symbol19.exported) continue;
-      symbols.push({
-        ...symbol19,
-        path,
-        body: bodyLines(rawLines, symbol19.line - 1).join("\n")
-      });
-    }
-    if (symbols.length >= MAX_INDEXED_SYMBOLS) {
-      symbolsTruncated = true;
-      break;
-    }
-  }
-  return {
-    symbols,
-    fileCount: read,
-    skippedFiles: skipped,
-    truncated: truncated || symbolsTruncated
-  };
-}
-
-// src/similarity/exclusions.mjs
-var EXCLUDED_PATHS = [
-  /(^|\/)migrations?\//i,
-  /(^|\/)__generated__\//i,
-  /(^|\/)generated\//i,
-  /(^|\/)node_modules\//,
-  /(^|\/)vendor\//,
-  /(^|\/)(dist|build|out|bin|obj)\//i,
-  /(^|\/)wwwroot\//i,
-  /\.generated\.[a-z]+$/i,
-  /\.g\.[a-z]+$/i,
-  /\.designer\.[a-z]+$/i,
-  /\.min\.[a-z]+$/i,
-  /\.d\.ts$/i,
-  /(^|\/)migrations?[^/]*\.(cs|php|ts|js)$/i,
-  // Tests, for the same reason as migrations: repetition there is the pattern,
-  // not a defect. Arrange/act/assert makes any two test methods look alike, and
-  // a real run bore that out — eight candidate pairs surfaced on a single pull
-  // request and the model judged all eight unrelated, one model call each. The
-  // check exists to find reimplemented production logic; two tests that set up
-  // the same fixture are doing their job.
-  /(^|\/)(tests?|__tests__|spec)\//i,
-  /\.(test|spec)\.[a-z]+$/i,
-  // `[^/]+`, no `[^/]*`: la convencion es `OrderServiceTests.cs` / `OrderTest.php`.
-  // Con `*`, un controlador de produccion llamado `Test.php` quedaba excluido.
-  /(^|\/)[^/]+Tests?\.(cs|php)$/
-];
-var EXCLUDED_NAMES = [
-  /(Dto|DTO)s?$/,
-  /(Request|Response|Payload|ViewModel|Model)$/,
-  /Mapper$/i,
-  /Profile$/,
-  // AutoMapper profiles
-  /Migration$/i,
-  /(Entity|Enum|Constants?|Options|Settings|Config(uration)?)$/
-];
-var COMPARABLE_KINDS = /* @__PURE__ */ new Set(["method", "function"]);
-function isExcludedPath(path) {
-  const value = String(path || "");
-  return EXCLUDED_PATHS.some((pattern) => pattern.test(value));
-}
-function isExcludedSymbol(symbol19) {
-  if (!symbol19) return true;
-  if (isExcludedPath(symbol19.path)) return true;
-  if (!COMPARABLE_KINDS.has(symbol19.kind)) return true;
-  return EXCLUDED_NAMES.some((pattern) => pattern.test(String(symbol19.name || "")));
-}
-function applyExclusions(symbols = []) {
-  return symbols.filter((symbol19) => !isExcludedSymbol(symbol19));
-}
-
-// src/similarity/name.mjs
-var STOP_TOKENS = /* @__PURE__ */ new Set([
-  "get",
-  "set",
-  "the",
-  "a",
-  "an",
-  "of",
-  "for",
-  "to",
-  "by",
-  "with",
-  "from",
-  "and",
-  "or",
-  "is",
-  "do",
-  "my",
-  "new",
-  "obj",
-  "data",
-  "value",
-  "item",
-  "result"
-]);
-var SYNONYMS = new Map(
-  Object.entries({
-    calculate: "compute",
-    calc: "compute",
-    fetch: "load",
-    retrieve: "load",
-    read: "load",
-    build: "create",
-    make: "create",
-    generate: "create",
-    remove: "delete",
-    destroy: "delete",
-    check: "validate",
-    verify: "validate",
-    ensure: "validate",
-    convert: "map",
-    transform: "map",
-    parse: "map",
-    find: "search",
-    lookup: "search",
-    send: "dispatch",
-    total: "sum",
-    amount: "sum"
-  })
-);
-var MAX_NAME_CHARS2 = 200;
-function tokenize(name17) {
-  return String(name17 || "").slice(0, MAX_NAME_CHARS2).replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z])([A-Z][a-z])/g, "$1 $2").split(/[^A-Za-z0-9]+/).map((token) => token.toLowerCase()).filter(Boolean).map((token) => singular(token)).map((token) => SYNONYMS.get(token) ?? token).filter((token) => !STOP_TOKENS.has(token));
-}
-function singular(token) {
-  if (token.length > 3 && token.endsWith("ies")) return `${token.slice(0, -3)}y`;
-  if (token.length > 3 && token.endsWith("ses")) return token.slice(0, -2);
-  if (token.length > 3 && token.endsWith("s") && !token.endsWith("ss")) return token.slice(0, -1);
-  return token;
-}
-function nameSimilarity(a, b) {
-  const left = new Set(tokenize(a));
-  const right = new Set(tokenize(b));
-  if (!left.size || !right.size) return 0;
-  let shared = 0;
-  for (const token of left) if (right.has(token)) shared += 1;
-  return shared / Math.min(left.size, right.size);
-}
-
-// src/similarity/signature.mjs
-var MODIFIERS = /\b(public|private|protected|internal|static|virtual|override|abstract|sealed|async|export|default|function|const|let|var|readonly|final|new|partial|unsafe|extern)\b/g;
-function paramText(signature) {
-  const open = signature.indexOf("(");
-  if (open === -1) return null;
-  let depth = 0;
-  for (let i = open; i < signature.length; i += 1) {
-    if (signature[i] === "(") depth += 1;
-    else if (signature[i] === ")") {
-      depth -= 1;
-      if (depth === 0) return signature.slice(open + 1, i);
-    }
-  }
-  return signature.slice(open + 1);
-}
-function splitParams(text3) {
-  const parts = [];
-  let depth = 0;
-  let current = "";
-  for (const char of text3) {
-    if (char === "<" || char === "(" || char === "[") depth += 1;
-    else if (char === ">" || char === ")" || char === "]") depth -= 1;
-    if (char === "," && depth <= 0) {
-      parts.push(current);
-      current = "";
-    } else {
-      current += char;
-    }
-  }
-  parts.push(current);
-  return parts.map((part) => part.trim()).filter(Boolean);
-}
-function normalizeSignature(signature) {
-  const raw = String(signature || "").replace(/\[[^\]]*\]/g, " ").replace(/=>.*$/, "").replace(/\{.*$/, "").replace(MODIFIERS, " ").trim();
-  const params = paramText(raw);
-  const before = params === null ? raw : raw.slice(0, raw.indexOf("("));
-  const types = params === null ? [] : splitParams(params).map(paramType);
-  const annotated = raw.match(/\)\s*:\s*([A-Za-z_][\w<>,.\[\]?| ]*)/);
-  const leading = before.trim().split(/\s+/).filter(Boolean);
-  const returns = annotated ? clean(annotated[1]) : leading.length > 1 ? clean(leading[leading.length - 2]) : "";
-  return { arity: params === null ? null : types.length, types, returns };
-}
-function paramType(param) {
-  const stripped = param.replace(/=.*$/, "").trim();
-  const annotated = stripped.match(/:\s*(.+)$/);
-  if (annotated) return clean(annotated[1]);
-  const words = stripped.split(/\s+/).filter(Boolean);
-  if (words.length >= 2) return clean(words[words.length - 2]);
-  return "";
-}
-function clean(type) {
-  return String(type).replace(/[?\s]/g, "").replace(/^\$/, "").toLowerCase();
-}
-function signatureSimilarity(a, b) {
-  const left = normalizeSignature(a);
-  const right = normalizeSignature(b);
-  if (left.arity === null || right.arity === null) return 0;
-  if (left.arity !== right.arity) return 0;
-  let score = 0.4;
-  if (left.arity > 0) {
-    let matched = 0;
-    for (let i = 0; i < left.arity; i += 1) {
-      if (!left.types[i] || !right.types[i]) matched += 0.5;
-      else if (left.types[i] === right.types[i]) matched += 1;
-    }
-    score += 0.4 * (matched / left.arity);
-  } else {
-    score += 0.4;
-  }
-  if (left.returns && right.returns && left.returns === right.returns) score += 0.2;
-  else if (!left.returns || !right.returns) score += 0.1;
-  return Math.min(1, score);
-}
-
-// src/similarity/body.mjs
-var KEYWORDS = /* @__PURE__ */ new Set([
-  "if",
-  "else",
-  "for",
-  "foreach",
-  "while",
-  "do",
-  "switch",
-  "case",
-  "default",
-  "break",
-  "continue",
-  "return",
-  "throw",
-  "try",
-  "catch",
-  "finally",
-  "new",
-  "await",
-  "yield",
-  "null",
-  "true",
-  "false",
-  "this",
-  "self",
-  "typeof",
-  "instanceof",
-  "in",
-  "of",
-  "as",
-  "is"
-]);
-var SHINGLE = 4;
-var MIN_TOKENS = 8;
-var MAX_BODY_CHARS2 = 2e4;
-function normalizeBody(body) {
-  const stripped = String(body || "").slice(0, MAX_BODY_CHARS2).replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ").replace(/(^|\s)#[^\n]*/g, "$1 ").replace(/"(?:[^"\\]|\\.)*"/g, ' "S" ').replace(/'(?:[^'\\]|\\.)*'/g, ' "S" ').replace(/`(?:[^`\\]|\\.)*`/g, ' "S" ').replace(/\b\d[\d_.]*\b/g, " 0 ");
-  const tokens = [];
-  const pattern = /[A-Za-z_$][\w$]*|[{}()[\];,.=<>+\-*/%!&|?:]/g;
-  for (const [match] of stripped.matchAll(pattern)) {
-    if (/^[A-Za-z_$]/.test(match)) {
-      const lower = match.toLowerCase();
-      tokens.push(KEYWORDS.has(lower) ? lower : "X");
-    } else {
-      tokens.push(match);
-    }
-  }
-  return tokens;
-}
-function shingles(tokens, size = SHINGLE) {
-  const out = /* @__PURE__ */ new Set();
-  for (let i = 0; i + size <= tokens.length; i += 1) {
-    out.add(tokens.slice(i, i + size).join(" "));
-  }
-  return out;
-}
-function bodySimilarity(a, b) {
-  const left = normalizeBody(a);
-  const right = normalizeBody(b);
-  if (left.length < MIN_TOKENS || right.length < MIN_TOKENS) return 0;
-  const leftShingles = shingles(left);
-  const rightShingles = shingles(right);
-  if (!leftShingles.size || !rightShingles.size) return 0;
-  let shared = 0;
-  for (const shingle of leftShingles) if (rightShingles.has(shingle)) shared += 1;
-  return shared / (leftShingles.size + rightShingles.size - shared);
-}
-
-// src/similarity/score.mjs
-var DEFAULT_WEIGHTS = { name: 0.3, signature: 0.2, body: 0.5 };
-var DEFAULT_THRESHOLD = 0.55;
-var STRONG_BODY = 0.8;
-var MAX_CANDIDATES = 5;
-var shingleCache = /* @__PURE__ */ new WeakMap();
-function shinglesFor(symbol19) {
-  const cached2 = shingleCache.get(symbol19);
-  if (cached2) return cached2;
-  const computed = shingles(normalizeBody(symbol19.body ?? ""));
-  shingleCache.set(symbol19, computed);
-  return computed;
-}
-var tokenCache = /* @__PURE__ */ new WeakMap();
-var signatureCache = /* @__PURE__ */ new WeakMap();
-function tokensFor(symbol19) {
-  const cached2 = tokenCache.get(symbol19);
-  if (cached2) return cached2;
-  const computed = new Set(tokenize(symbol19.name ?? ""));
-  tokenCache.set(symbol19, computed);
-  return computed;
-}
-function signatureFor(symbol19) {
-  const cached2 = signatureCache.get(symbol19);
-  if (cached2) return cached2;
-  const computed = normalizeSignature(symbol19.signature ?? "");
-  signatureCache.set(symbol19, computed);
-  return computed;
-}
-function cannotClear(a, b, threshold, weights = DEFAULT_WEIGHTS) {
-  if (tokensShare(tokensFor(a), tokensFor(b))) return false;
-  const left = signatureFor(a);
-  const right = signatureFor(b);
-  const arityCouldMatch = left.arity !== null && right.arity !== null && left.arity === right.arity;
-  if (arityCouldMatch) return false;
-  const sizeA = shinglesFor(a).size;
-  const sizeB = shinglesFor(b).size;
-  if (!sizeA || !sizeB) return true;
-  const ceiling = Math.min(sizeA, sizeB) / Math.max(sizeA, sizeB);
-  return ceiling < STRONG_BODY && weights.body * ceiling < threshold;
-}
-function tokensShare(left, right) {
-  for (const token of left) if (right.has(token)) return true;
-  return false;
-}
-function jaccard(left, right) {
-  if (!left.size || !right.size) return 0;
-  let shared = 0;
-  for (const item of left) if (right.has(item)) shared += 1;
-  return shared / (left.size + right.size - shared);
-}
-function scorePair(a, b, weights = DEFAULT_WEIGHTS) {
-  const name17 = nameSimilarity(a.name, b.name);
-  const signature = signatureSimilarity(a.signature, b.signature);
-  const body = a.body && b.body ? jaccard(shinglesFor(a), shinglesFor(b)) : bodySimilarity(a.body, b.body);
-  const weighted = weights.name * name17 + weights.signature * signature + weights.body * body;
-  const score = body >= STRONG_BODY ? Math.max(weighted, body) : weighted;
-  return { score, name: name17, signature, body };
-}
-function isSameSymbol(a, b) {
-  if (a.path !== b.path) return false;
-  return a.line === b.line || a.name === b.name && a.kind === b.kind;
-}
-function findDuplicates({
-  symbols = [],
-  index = [],
-  threshold = DEFAULT_THRESHOLD,
-  maxCandidates = MAX_CANDIDATES,
-  weights = DEFAULT_WEIGHTS,
-  deadline = null
-} = {}) {
-  const out = [];
-  for (const symbol19 of symbols) {
-    if (deadline !== null && Date.now() >= deadline) break;
-    const matches = [];
-    for (const candidate of index) {
-      if (isSameSymbol(symbol19, candidate)) continue;
-      if (cannotClear(symbol19, candidate, threshold, weights)) continue;
-      const signals = scorePair(symbol19, candidate, weights);
-      if (signals.score < threshold) continue;
-      matches.push({ candidate, score: signals.score, signals });
-    }
-    if (!matches.length) continue;
-    matches.sort((a, b) => b.score - a.score);
-    out.push({ symbol: symbol19, matches: matches.slice(0, maxCandidates) });
-  }
-  out.sort((a, b) => b.matches[0].score - a.matches[0].score);
-  return out;
-}
-
-// src/context/duplication.mjs
-var BUDGET_MS = 2e4;
-function introducedSymbols(diffText, index) {
-  const added = symbolsFromDiff(diffText);
-  const byPath = /* @__PURE__ */ new Map();
-  for (const symbol19 of index) {
-    const list = byPath.get(symbol19.path) ?? [];
-    list.push(symbol19);
-    byPath.set(symbol19.path, list);
-  }
-  const out = [];
-  for (const ref of added) {
-    const candidates = byPath.get(ref.path) ?? [];
-    const exact = candidates.find((s) => s.line === ref.line && s.name === ref.name);
-    const byName = exact ?? candidates.find((s) => s.name === ref.name);
-    if (byName) out.push(byName);
-  }
-  return out;
-}
-function pairKey(a, b) {
-  const left = `${a.path}:${a.line}:${a.name}`;
-  const right = `${b.path}:${b.line}:${b.name}`;
-  return left < right ? `${left}|${right}` : `${right}|${left}`;
-}
-function buildDuplicationContext({
-  diffText = "",
-  repo = ".",
-  threshold = DEFAULT_THRESHOLD,
-  maxCandidates = MAX_CANDIDATES
-} = {}) {
-  const index = buildSymbolIndex({ repo, exclude: isExcludedPath });
-  const introduced = applyExclusions(introducedSymbols(diffText, index.symbols));
-  const comparable = applyExclusions(index.symbols);
-  const deadline = Date.now() + BUDGET_MS;
-  const raw = findDuplicates({
-    symbols: introduced,
-    index: comparable,
-    threshold,
-    maxCandidates,
-    deadline
-  });
-  const timedOut = Date.now() >= deadline;
-  const introducedKeys = new Set(introduced.map((s) => `${s.path}:${s.line}:${s.name}`));
-  const seen = /* @__PURE__ */ new Set();
-  const findings = [];
-  for (const finding of raw) {
-    const matches = [];
-    for (const match of finding.matches) {
-      const key = pairKey(finding.symbol, match.candidate);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      matches.push({
-        ...match,
-        introducedHere: introducedKeys.has(
-          `${match.candidate.path}:${match.candidate.line}:${match.candidate.name}`
-        )
-      });
-    }
-    if (matches.length) findings.push({ symbol: finding.symbol, matches });
-  }
-  return {
-    indexed: index.symbols.length,
-    indexTruncated: index.truncated,
-    // The comparison stopped on its budget rather than on running out of pairs.
-    comparisonTruncated: timedOut,
-    introduced: introduced.length,
-    findings
-  };
-}
-
-// src/context/rules.mjs
-import { lstatSync as lstatSync2, readdirSync, readFileSync as readFileSync3 } from "node:fs";
-import { join as join3, relative as relative2, sep as sep2 } from "node:path";
-var DEFAULT_RULES_DIR = join3(".claude", "rules");
-var DEFAULT_MAX_RULES_CHARS = 48e3;
-var RULE_FILE_PATTERN = /\.(md|mdc|txt)$/i;
-var UNREADABLE_REASON = "no es un archivo regular dentro del repositorio";
-var RULE_SOURCES = [
-  { kind: "dir", path: join3(".claude", "rules"), origin: "reglas del proyecto" },
-  { kind: "dir", path: join3(".cursor", "rules"), origin: "reglas del editor" },
-  { kind: "file", path: ".cursorrules", origin: "reglas del editor" },
-  { kind: "file", path: ".github/copilot-instructions.md", origin: "instrucciones del asistente" },
-  { kind: "file", path: "CLAUDE.md", origin: "instrucciones del asistente" },
-  { kind: "file", path: "AGENTS.md", origin: "instrucciones del asistente" },
-  { kind: "file", path: "CONTRIBUTING.md", origin: "gu\xEDa de contribuci\xF3n" }
-];
-function walk(dir) {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const out = [];
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    const full = join3(dir, entry.name);
-    if (entry.isDirectory()) out.push(...walk(full));
-    else if (RULE_FILE_PATTERN.test(entry.name)) out.push(full);
-  }
-  return out;
-}
-function exists(path) {
-  try {
-    return lstatSync2(path, { throwIfNoEntry: false }) != null;
-  } catch {
-    return false;
-  }
-}
-function discover(repo, rulesDir) {
-  const found = [];
-  const blocked = [];
-  const seen = /* @__PURE__ */ new Set();
-  const sources = rulesDir ? [{ kind: "dir", path: rulesDir, origin: "reglas del proyecto", absolute: true }] : RULE_SOURCES;
-  const root = rulesDir || repo;
-  for (const source of sources) {
-    const base = source.absolute ? source.path : join3(repo, source.path);
-    if (source.kind === "dir") {
-      for (const file2 of walk(base)) {
-        if (seen.has(file2)) continue;
-        seen.add(file2);
-        const entry = {
-          file: file2,
-          // Labelled relative to its own source folder, so the model sees
-          // `naming.md` rather than a path that means nothing to it.
-          label: relative2(base, file2).split(sep2).join("/"),
-          origin: source.origin
-        };
-        (isRegularFileWithin(file2, root) ? found : blocked).push(entry);
-      }
-      continue;
-    }
-    if (seen.has(base)) continue;
-    if (isRegularFileWithin(base, root)) {
-      seen.add(base);
-      found.push({ file: base, label: source.path, origin: source.origin });
-    } else if (exists(base)) {
-      seen.add(base);
-      blocked.push({ file: base, label: source.path, origin: source.origin });
-    }
-  }
-  return { found, blocked };
-}
-function loadRules({
-  repo = ".",
-  rulesDir,
-  maxChars = DEFAULT_MAX_RULES_CHARS,
-  touched = null
-} = {}) {
-  const { found: discovered, blocked } = discover(repo, rulesDir);
-  const unreadable = blocked.map((entry) => entry.label);
-  const sources = [];
-  const omittedSources = blocked.map((entry) => ({
-    path: entry.label,
-    chars: 0,
-    reason: UNREADABLE_REASON
-  }));
-  const parts = [];
-  let used = 0;
-  let truncated = false;
-  let totalChars = 0;
-  for (const found of discovered) {
-    let body;
-    try {
-      body = readFileSync3(found.file, "utf8").trim();
-    } catch {
-      continue;
-    }
-    const scope = declaredScope(body);
-    const section = `### ${found.label}
-${stripFrontmatter(body)}`;
-    totalChars += section.length;
-    if (touched && scope.length && !matchesAny(scope, touched)) {
-      omittedSources.push({
-        path: found.label,
-        chars: section.length,
-        reason: `fuera de alcance (declara ${scope.join(", ")})`
-      });
-      continue;
-    }
-    if (used + section.length > maxChars) {
-      truncated = true;
-      omittedSources.push({ path: found.label, chars: section.length, reason: "presupuesto" });
-      continue;
-    }
-    parts.push(section);
-    sources.push({ path: found.label, chars: section.length, origin: found.origin });
-    used += section.length + 2;
-  }
-  return {
-    dir: rulesDir || join3(repo, DEFAULT_RULES_DIR),
-    sources,
-    text: parts.join("\n\n"),
-    totalChars,
-    truncated,
-    // Echoed back so a note can state the number that did the dropping.
-    maxChars,
-    omittedSources,
-    // Rule files the repository declared and this gate refused to read.
-    unreadable,
-    // Every section there was got dropped for budget. Distinct from `empty`
-    // because the fix is different — raise the budget, versus write some rules —
-    // and because a check that skips green claiming "sin reglas declaradas"
-    // while `CLAUDE.md` sits untouched in the tree is stating something false.
-    // The budget is settable from the branch under review, so `maxRulesChars: 1`
-    // used to buy a green skip on a blocking check with no warning attached.
-    budgetExhausted: parts.length === 0 && omittedSources.some((s) => s.reason === "presupuesto"),
-    // `empty` answers exactly one question: did this repository write nothing
-    // down? A corpus emptied by the read guard, by scope, or by the budget is
-    // the opposite answer — the rules are there, in the tree, and were not
-    // applied — so none of those may reach the runner as "sin reglas
-    // declaradas". Callers that need "is there anything to send to the model"
-    // read `text`.
-    empty: parts.length === 0 && unreadable.length === 0 && omittedSources.length === 0
-  };
-}
-function rulesTruncationNote(rules) {
-  if (!rules.truncated) return null;
-  const omitted = rules.omittedSources.filter((s) => s.reason === "presupuesto").map((s) => s.path).join(", ");
-  return `Corpus de reglas truncado: ${rules.sources.length} de ${rules.sources.length + rules.omittedSources.length} archivos cargados (${rules.totalChars} caracteres en total). Omitidos por presupuesto: ${omitted}.`;
-}
-function rulesSourceNotes(rules) {
-  const notes = [];
-  if (rules.sources.length) {
-    notes.push(
-      `Reglas cargadas (${rules.sources.length}): ${rules.sources.map((s) => s.path).join(", ")}.`
-    );
-  }
-  const unreadable = rules.omittedSources.filter((s) => s.reason === UNREADABLE_REASON);
-  if (unreadable.length) {
-    notes.push(
-      `Reglas no le\xEDdas (${unreadable.length}): ${unreadable.map((s) => s.path).join(", ")}. Solo se leen archivos regulares dentro del repositorio: un enlace simb\xF3lico podr\xEDa apuntar a credenciales del runner o a una ruta fuera del checkout.`
-    );
-  }
-  const scoped = rules.omittedSources.filter(
-    (s) => s.reason !== "presupuesto" && s.reason !== UNREADABLE_REASON
-  );
-  if (scoped.length) {
-    notes.push(
-      `Reglas omitidas por no aplicar a los archivos de este PR (${scoped.length}): ${scoped.map((s) => `${s.path} \u2014 ${s.reason}`).join("; ")}.`
-    );
-  }
-  return notes;
-}
-var FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
-var SCOPE_KEY = /^\s*(globs|appliesTo|applies_to|files)\s*:\s*(.+)$/im;
-function declaredScope(body) {
-  const front = String(body || "").match(FRONTMATTER);
-  if (!front) return [];
-  const scope = front[1].match(SCOPE_KEY);
-  if (!scope) return [];
-  return scope[2].replace(/^\[|\]$/g, "").split(",").map((glob) => glob.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
-}
-function stripFrontmatter(body) {
-  return String(body || "").replace(FRONTMATTER, "").trim();
-}
-function matchesAny(globs, paths) {
-  const patterns = globs.map(globToRegExp).filter(Boolean);
-  if (!patterns.length) return true;
-  return paths.some((path) => patterns.some((pattern) => pattern.test(path)));
-}
-function globToRegExp(glob) {
-  let out = "";
-  let braces = 0;
-  for (let i = 0; i < glob.length; i += 1) {
-    const char = glob[i];
-    if (char === "*") {
-      if (glob[i + 1] === "*") {
-        if (glob[i + 2] === "/") {
-          out += "(?:.*/)?";
-          i += 2;
-        } else {
-          out += ".*";
-          i += 1;
-        }
-      } else {
-        out += "[^/]*";
-      }
-    } else if (char === "?") {
-      out += "[^/]";
-    } else if (char === "{") {
-      braces += 1;
-      out += "(?:";
-    } else if (char === "}" && braces > 0) {
-      braces -= 1;
-      out += ")";
-    } else if (char === "," && braces > 0) {
-      out += "|";
-    } else {
-      out += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-    }
-  }
-  while (braces > 0) {
-    out += ")";
-    braces -= 1;
-  }
-  try {
-    return new RegExp(`^${out}$`, "i");
-  } catch {
-    return null;
-  }
-}
+import { writeFileSync as writeFileSync2 } from "node:fs";
 
 // src/context/config.mjs
 var VALIDATOR_DEFAULTS = {
@@ -35990,15 +34821,19 @@ function gateOverrideNotes(repoConfig = {}, check2 = "") {
 }
 
 // src/context/repo-config.mjs
-import { readFileSync as readFileSync4 } from "node:fs";
-import { join as join4 } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 var DEFAULT_CONFIG_PATH = ".pr-validator.json";
 var TOP_LEVEL_KEYS = /* @__PURE__ */ new Set([
   "checks",
   "model",
   "maxDiffChars",
   "maxRulesChars",
-  "checksConfig"
+  "checksConfig",
+  // Settings for running the validator on a developer's machine. The pull
+  // request run never reads them, so their contents are not validated here:
+  // the local runner owns that block and reports on it itself.
+  "local"
 ]);
 var PER_CHECK_KEYS = /* @__PURE__ */ new Set([
   "model",
@@ -36010,11 +34845,20 @@ var PER_CHECK_KEYS = /* @__PURE__ */ new Set([
   "threshold",
   "maxCandidates"
 ]);
+var CHECK_SPECIFIC_KEYS = {
+  // Pairs the team has already judged acceptable, and the folder of shared
+  // helpers new code is expected to reuse.
+  duplication: /* @__PURE__ */ new Set(["allow", "reference"])
+};
+function isKnownCheckKey(check2, key) {
+  if (PER_CHECK_KEYS.has(key)) return true;
+  return Object.hasOwn(CHECK_SPECIFIC_KEYS, check2) && CHECK_SPECIFIC_KEYS[check2].has(key);
+}
 function loadRepoConfig({ repo = ".", configPath = DEFAULT_CONFIG_PATH } = {}) {
-  const full = join4(repo, configPath || DEFAULT_CONFIG_PATH);
+  const full = join(repo, configPath || DEFAULT_CONFIG_PATH);
   let raw;
   try {
-    raw = readFileSync4(full, "utf8");
+    raw = readFileSync(full, "utf8");
   } catch {
     return { config: {}, present: false, notes: [] };
   }
@@ -36047,7 +34891,7 @@ function unknownKeyNotes(config2, configPath) {
     for (const [name17, settings] of Object.entries(checks)) {
       if (!settings || typeof settings !== "object") continue;
       for (const key of Object.keys(settings)) {
-        if (!PER_CHECK_KEYS.has(key)) perCheck.push(`checks.${name17}.${key}`);
+        if (!isKnownCheckKey(name17, key)) perCheck.push(`checks.${name17}.${key}`);
       }
     }
   }
@@ -36063,18 +34907,3682 @@ function perCheckSettings(config2) {
   return config2?.checksConfig ?? {};
 }
 
+// src/context/diff.mjs
+import { execFileSync } from "node:child_process";
+
+// src/context/files.mjs
+import { lstatSync, realpathSync } from "node:fs";
+import { isAbsolute, relative, sep } from "node:path";
+function isRegularFileWithin(path, root) {
+  try {
+    if (!lstatSync(path).isFile()) return false;
+    const relativePath = relative(realpathSync(root), realpathSync(path));
+    return relativePath !== "" && !isAbsolute(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep}`);
+  } catch {
+    return false;
+  }
+}
+var NON_CODE_EXTENSION = /\.(md|markdown|txt|rst|adoc|png|jpe?g|gif|svg|webp|ico|bmp|pdf|woff2?|ttf|eot|mp4|mov|zip|gz)$/i;
+var NON_CODE_NAME = /^(LICENSE|NOTICE|AUTHORS|CODEOWNERS|\.gitattributes|\.gitignore)$/i;
+function filesFromStat(stat) {
+  const out = [];
+  for (const line of String(stat || "").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || /\bfiles?\s+changed\b/.test(trimmed)) continue;
+    const separator = trimmed.lastIndexOf("|");
+    if (separator === -1) continue;
+    let path = trimmed.slice(0, separator).trim();
+    if (!path) continue;
+    const rename = path.match(/^(.*)\{.*=>\s*(.*?)\}(.*)$/);
+    if (rename) path = `${rename[1]}${rename[2]}${rename[3]}`.replace(/\/{2,}/g, "/");
+    out.push(path.trim());
+  }
+  return out;
+}
+function isCodeFile(path) {
+  const name17 = String(path || "").split("/").pop() ?? "";
+  if (!name17) return false;
+  if (NON_CODE_NAME.test(name17)) return false;
+  return !NON_CODE_EXTENSION.test(name17);
+}
+function classifyDiffFiles(diffCtx) {
+  const files = filesFromStat(diffCtx?.stat);
+  const code = files.filter(isCodeFile);
+  return {
+    files,
+    code,
+    nonCode: files.filter((path) => !isCodeFile(path)),
+    // An empty diff has no code, but it is already short-circuited earlier as
+    // "no changes"; saying `false` here keeps this function honest either way.
+    hasCode: code.length > 0
+  };
+}
+
+// src/context/categories.mjs
+var CATEGORIES = [
+  ["lockfile", /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|packages\.lock\.json|composer\.lock|Cargo\.lock|poetry\.lock|Gemfile\.lock)$/i],
+  ["tooling", /(^|\/)\.(claude|agents)\//i],
+  ["docs", /\.(md|mdx|markdown|rst|adoc|txt)$/i],
+  ["snapshot", /(^|\/)__snapshots__\/|\.snap$/i],
+  [
+    "test",
+    /(\.|_)(test|spec)\.[a-z]+$|Tests?\.(cs|php|java|kt)$|(^|\/)(tests?|__tests__|__mocks__|spec|e2e|cypress|playwright)\/|(^|\/)[^/]*\.(Tests?|UnitTests|IntegrationTests)(\.[^/]+)?\//i
+  ],
+  [
+    "generated",
+    /\.Designer\.cs$|ModelSnapshot\.cs$|\.g\.(cs|ts|dart)$|\.generated\.[a-z]+$|\.min\.(js|css)$|(^|\/)(dist|\.nuxt|\.output|\.next|obj)\//i
+  ],
+  ["locale", /(^|\/)(locales?|i18n|lang|translations)\/.*\.(json|ya?ml)$/i],
+  ["style", /\.(css|scss|sass|less|styl)$/i]
+];
+var BUDGET_EXEMPT_CATEGORIES = /* @__PURE__ */ new Set(["lockfile", "snapshot", "generated"]);
+function categorize(path) {
+  const normalized = String(path || "").replace(/\\/g, "/");
+  for (const [category, pattern] of CATEGORIES) {
+    if (pattern.test(normalized)) return category;
+  }
+  if (!isCodeFile(normalized)) return "asset";
+  return "prod";
+}
+function isBudgetExempt(path) {
+  return BUDGET_EXEMPT_CATEGORIES.has(categorize(path));
+}
+
+// src/context/diff.mjs
+var DEFAULT_MAX_DIFF_CHARS = 36e3;
+var DiffError = class extends Error {
+  /**
+   * @param {string} message
+   * @param {{contentFailure?: boolean}} [opts] `contentFailure` marks a failure
+   *   caused by the change under review rather than by the environment, so the
+   *   runner can block on it instead of reporting a non-blocking tool error.
+   */
+  constructor(message, { contentFailure = false } = {}) {
+    super(message);
+    this.name = "DiffError";
+    this.contentFailure = contentFailure;
+  }
+};
+function isTooLargeError(err) {
+  return err?.code === "ENOBUFS" || /maxBuffer/i.test(String(err?.message ?? ""));
+}
+function git(repo, args) {
+  return execFileSync("git", ["-C", repo, ...args], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    // Capture stderr instead of inheriting it: a failed fetch is handled here
+    // and must not spray git noise into the CI log as if something broke.
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+}
+function countStatFiles(stat) {
+  if (!stat) return 0;
+  const lines = stat.split("\n").filter((l) => l.trim());
+  if (!lines.length) return 0;
+  const last = lines[lines.length - 1];
+  return /\bfiles? changed\b/.test(last) ? lines.length - 1 : lines.length;
+}
+var MAX_EXEMPT_LISTED = 20;
+function sectionPath(section) {
+  const plus = section.match(/^\+\+\+ b\/(.+?)\r?$/m);
+  if (plus) return plus[1];
+  const header2 = section.match(/^diff --git a\/.+? b\/(.+?)\r?$/m);
+  return header2 ? header2[1] : "";
+}
+function splitBudgetExempt(diff) {
+  const sections = String(diff ?? "").split(/(?=^diff --git )/m);
+  const kept = [];
+  const exempt = [];
+  for (const section of sections) {
+    const path = section.startsWith("diff --git ") ? sectionPath(section) : "";
+    if (path && isBudgetExempt(path)) exempt.push({ path, chars: section.length });
+    else kept.push(section);
+  }
+  return { reviewable: kept.join(""), exempt };
+}
+function exemptLine(exempt) {
+  const shown = exempt.slice(0, MAX_EXEMPT_LISTED).map((entry) => entry.path);
+  const more = exempt.length > shown.length ? `, +${exempt.length - shown.length} more` : "";
+  return `[... ${exempt.length} generated, lockfile or snapshot file(s) left out of the diff body, not reviewed line by line: ${shown.join(", ")}${more} ...]`;
+}
+function budgetRank(path) {
+  switch (categorize(path)) {
+    case "prod":
+      return 0;
+    case "style":
+    case "locale":
+      return 1;
+    case "test":
+      return 2;
+    default:
+      return 3;
+  }
+}
+function sectionHead(text3, maxChars) {
+  const slice = text3.slice(0, Math.max(0, maxChars));
+  const firstHunk = text3.indexOf("\n@@ ");
+  const lastHunk = slice.lastIndexOf("\n@@ ");
+  if (firstHunk >= 0 && lastHunk > firstHunk) return slice.slice(0, lastHunk + 1);
+  const line = slice.lastIndexOf("\n");
+  return line > 0 ? slice.slice(0, line + 1) : slice;
+}
+function fitDiffToBudget(reviewable, maxChars) {
+  const text3 = String(reviewable ?? "");
+  const sections = text3.split(/(?=^diff --git )/m).map((body, index) => {
+    const isFile = body.startsWith("diff --git ");
+    const path = isFile ? sectionPath(body) : "";
+    return { body, index, isFile, path, rank: isFile ? budgetRank(path) : -1 };
+  });
+  const files = sections.filter((section) => section.isFile);
+  if (text3.length <= maxChars) {
+    return { diff: text3, truncated: false, included: files.map((f) => f.path), omitted: [], partial: null };
+  }
+  const queue = [...files].sort((a, b) => a.rank - b.rank || a.index - b.index);
+  let used = sections.filter((section) => !section.isFile).reduce((sum, section) => sum + section.body.length, 0);
+  const shown = /* @__PURE__ */ new Map();
+  for (const section of queue) {
+    if (used + section.body.length > maxChars) continue;
+    shown.set(section.index, section.body);
+    used += section.body.length;
+  }
+  let partial2 = null;
+  if (!shown.size && queue.length) {
+    const first = queue[0];
+    shown.set(first.index, sectionHead(first.body, maxChars - used));
+    partial2 = first.path;
+  }
+  return {
+    diff: sections.filter((section) => !section.isFile || shown.has(section.index)).map((section) => section.isFile ? shown.get(section.index) : section.body).join(""),
+    truncated: true,
+    included: files.filter((section) => shown.has(section.index)).map((section) => section.path),
+    omitted: files.filter((section) => !shown.has(section.index)).map((section) => section.path),
+    partial: partial2
+  };
+}
+function truncatedLine(maxChars, fit) {
+  let line = `[... diff truncated at ${maxChars} chars`;
+  if (fit.partial) line += `; ${fit.partial} is cut short`;
+  if (fit.omitted.length) {
+    line += `; ${fit.omitted.length} file(s) left out of this prompt and not reviewed here (production code goes first, then tests, then docs): ${fit.omitted.join(", ")}`;
+  }
+  return `${line} ...]`;
+}
+function ensureBaseRef(repo, base) {
+  const branch = base.replace(/^origin\//, "");
+  try {
+    git(repo, [
+      "fetch",
+      "--no-tags",
+      "--quiet",
+      "origin",
+      `+refs/heads/${branch}:refs/remotes/origin/${branch}`
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function buildDiff({ repo = ".", base, head = "HEAD", maxChars = DEFAULT_MAX_DIFF_CHARS } = {}) {
+  if (!base) throw new DiffError("buildDiff requires a base ref");
+  let stat;
+  let diff;
+  try {
+    stat = git(repo, ["diff", "--stat=10000", "--stat-graph-width=20", `${base}...${head}`]).trim();
+    diff = git(repo, ["diff", `${base}...${head}`]);
+  } catch (err) {
+    const tooLarge = isTooLargeError(err);
+    throw new DiffError(
+      tooLarge ? `El diff entre ${base} y ${head} excede el m\xE1ximo que se puede leer (64 MB). Divide el PR en cambios m\xE1s peque\xF1os.` : `git diff ${base}...${head} failed: ${err.message}`,
+      { contentFailure: tooLarge }
+    );
+  }
+  const empty = diff.trim().length === 0;
+  const totalFiles = countStatFiles(stat);
+  const { reviewable, exempt } = splitBudgetExempt(diff);
+  diff = reviewable;
+  const fullDiff = reviewable;
+  const totalChars = diff.length;
+  const fit = fitDiffToBudget(diff, maxChars);
+  const truncated = fit.truncated;
+  diff = fit.diff;
+  if (truncated) diff += `${diff && !diff.endsWith("\n") ? "\n" : ""}
+${truncatedLine(maxChars, fit)}`;
+  const includedFiles = truncated ? fit.included.length : Math.max(0, totalFiles - exempt.length);
+  if (exempt.length) diff += `${diff && !diff.endsWith("\n") ? "\n" : ""}
+${exemptLine(exempt)}`;
+  return {
+    stat,
+    diff,
+    fullDiff,
+    block: empty ? "(empty \u2014 the branch has no changes vs base)" : "```diff\n" + diff + "\n```",
+    empty,
+    truncated,
+    totalChars,
+    totalFiles,
+    includedFiles,
+    omittedFiles: Math.max(0, totalFiles - includedFiles - exempt.length),
+    omittedPaths: fit.omitted,
+    partialPath: fit.partial,
+    exemptFiles: exempt.map((entry) => entry.path),
+    exemptChars: exempt.reduce((sum, entry) => sum + entry.chars, 0)
+  };
+}
+function truncationNote(diffCtx) {
+  if (!diffCtx.truncated) return null;
+  const omitted = diffCtx.omittedFiles;
+  const scope = omitted > 0 ? `${omitted} de ${diffCtx.totalFiles} archivos quedaron fuera` : "el \xFAltimo archivo qued\xF3 incompleto";
+  const exempt = diffCtx.exemptFiles?.length ? ` Antes del recorte se apartaron ${diffCtx.exemptFiles.length} archivo(s) generados, lockfiles o snapshots.` : "";
+  return `Diff truncado en ${diffCtx.diff.length} de ${diffCtx.totalChars} caracteres: ${scope}. La revisi\xF3n es parcial.${exempt}`;
+}
+
+// src/context/coverage.mjs
+import { execFileSync as execFileSync3 } from "node:child_process";
+import { readFileSync as readFileSync3 } from "node:fs";
+import { join as join3, posix } from "node:path";
+
+// src/context/symbol-index.mjs
+import { execFileSync as execFileSync2 } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync as readFileSync2, statSync, writeFileSync } from "node:fs";
+import { join as join2 } from "node:path";
+
+// src/symbols/limits.mjs
+var MAX_NAME_CHARS = 200;
+
+// src/symbols/scan.mjs
+var REGEX_PRECEDERS = /* @__PURE__ */ new Set(["(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%", "<", ">", "~", "^"]);
+var REGEX_KEYWORDS = /(?:^|[^\w$])(?:return|typeof|case|do|else|in|of|yield|await|delete|void|throw)$/;
+function maskSource(texts, { regex = true, verbatim = false } = {}) {
+  const out = [];
+  let mode = "code";
+  const templates = [];
+  let previous = "";
+  let previousWord = "";
+  let rawQuotes = 0;
+  for (const text3 of texts) {
+    const chars = String(text3 ?? "").split("");
+    const line = chars.length;
+    let i = 0;
+    while (i < line) {
+      const c = chars[i];
+      const next = chars[i + 1];
+      if (mode === "block") {
+        if (c === "*" && next === "/") {
+          chars[i] = " ";
+          chars[i + 1] = " ";
+          i += 2;
+          mode = "code";
+          continue;
+        }
+        chars[i] = " ";
+        i += 1;
+        continue;
+      }
+      if (mode === "raw") {
+        if (c === '"') {
+          let run = 0;
+          while (chars[i + run] === '"') run += 1;
+          if (run >= rawQuotes) {
+            mode = "code";
+            previous = '"';
+            i += run;
+            continue;
+          }
+        }
+        chars[i] = " ";
+        i += 1;
+        continue;
+      }
+      if (mode === "verbatim") {
+        if (c === '"' && next === '"') {
+          chars[i] = " ";
+          chars[i + 1] = " ";
+          i += 2;
+          continue;
+        }
+        if (c === '"') {
+          mode = "code";
+          previous = '"';
+          i += 1;
+          continue;
+        }
+        chars[i] = " ";
+        i += 1;
+        continue;
+      }
+      if (mode === "template") {
+        if (c === "\\") {
+          chars[i] = " ";
+          if (i + 1 < line) chars[i + 1] = " ";
+          i += 2;
+          continue;
+        }
+        if (c === "`") {
+          mode = "code";
+          previous = "`";
+          i += 1;
+          continue;
+        }
+        if (c === "$" && next === "{") {
+          chars[i] = " ";
+          chars[i + 1] = " ";
+          templates.push(0);
+          mode = "code";
+          i += 2;
+          previous = "{";
+          continue;
+        }
+        chars[i] = " ";
+        i += 1;
+        continue;
+      }
+      if (c === "/" && next === "/") {
+        for (let k = i; k < line; k += 1) chars[k] = " ";
+        break;
+      }
+      if (c === "/" && next === "*") {
+        chars[i] = " ";
+        chars[i + 1] = " ";
+        i += 2;
+        mode = "block";
+        continue;
+      }
+      if (c === '"' && verbatim && next === '"' && chars[i + 2] === '"') {
+        let run = 0;
+        while (chars[i + run] === '"') run += 1;
+        rawQuotes = run;
+        mode = "raw";
+        i += run;
+        continue;
+      }
+      if (c === '"' && verbatim && (chars[i - 1] === "@" || chars[i - 1] === "$" && chars[i - 2] === "@")) {
+        mode = "verbatim";
+        i += 1;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        i = maskQuoted(chars, i, c);
+        previous = c;
+        previousWord = "";
+        continue;
+      }
+      if (c === "`") {
+        mode = "template";
+        i += 1;
+        continue;
+      }
+      if (c === "/" && regex && startsRegex(previous, previousWord)) {
+        i = maskRegex(chars, i);
+        previous = "/";
+        previousWord = "";
+        continue;
+      }
+      if (templates.length) {
+        if (c === "{") templates[templates.length - 1] += 1;
+        else if (c === "}") {
+          if (templates[templates.length - 1] === 0) {
+            chars[i] = " ";
+            templates.pop();
+            mode = "template";
+            i += 1;
+            continue;
+          }
+          templates[templates.length - 1] -= 1;
+        }
+      }
+      if (/[\w$]/.test(c)) {
+        previousWord = /[\w$]/.test(chars[i - 1] ?? "") ? previousWord + c : c;
+        previous = c;
+      } else if (!/\s/.test(c)) {
+        previous = c;
+        previousWord = "";
+      }
+      i += 1;
+    }
+    out.push(chars.join(""));
+  }
+  return out;
+}
+function startsRegex(previous, previousWord) {
+  if (previous === "") return true;
+  if (REGEX_PRECEDERS.has(previous)) return true;
+  return previousWord !== "" && REGEX_KEYWORDS.test(previousWord);
+}
+function maskQuoted(chars, start, quote) {
+  let i = start + 1;
+  while (i < chars.length) {
+    const c = chars[i];
+    if (c === "\\") {
+      chars[i] = " ";
+      if (i + 1 < chars.length) chars[i + 1] = " ";
+      i += 2;
+      continue;
+    }
+    if (c === quote) return i + 1;
+    chars[i] = " ";
+    i += 1;
+  }
+  return i;
+}
+function maskRegex(chars, start) {
+  let i = start + 1;
+  let inClass = false;
+  while (i < chars.length) {
+    const c = chars[i];
+    if (c === "\\") {
+      chars[i] = " ";
+      if (i + 1 < chars.length) chars[i + 1] = " ";
+      i += 2;
+      continue;
+    }
+    if (c === "[") inClass = true;
+    else if (c === "]") inClass = false;
+    else if (c === "/" && !inClass) {
+      i += 1;
+      while (i < chars.length && /[a-z]/i.test(chars[i])) i += 1;
+      return i;
+    }
+    chars[i] = " ";
+    i += 1;
+  }
+  return i;
+}
+function braceDepths(masked) {
+  const depths = [];
+  let depth = 0;
+  for (const line of masked) {
+    depths.push(depth);
+    for (const c of line) {
+      if (c === "{") depth += 1;
+      else if (c === "}") depth = Math.max(0, depth - 1);
+    }
+  }
+  return depths;
+}
+var ENDS_OPEN = /(?:=>|&&|\|\||\?\?|(?<![+-])[+-]|[*/%&|^?:=<.([{])$/;
+var STARTS_CONTINUING = /^(?:\?\.|\.(?!\.\.)|\?\?|&&|\|\||[-+*/%&|^?:<>=,]|(?:as|satisfies|instanceof)\b)/;
+function bodyEnd(masked, start, { maxLines = 5e3, raw = null } = {}) {
+  const last = Math.min(masked.length, start + maxLines) - 1;
+  let depth = 0;
+  let opened = false;
+  let arrow = false;
+  let afterArrow = false;
+  for (let i = start; i <= last; i += 1) {
+    const code = masked[i] ?? "";
+    for (let k = 0; k < code.length; k += 1) {
+      const c = code[k];
+      if (c === "(" || c === "[" || c === "{") {
+        depth += 1;
+        if (c === "{") opened = true;
+        if (arrow) afterArrow = true;
+      } else if (c === ")" || c === "]" || c === "}") {
+        depth -= 1;
+      } else if (c === "=" && code[k + 1] === ">" && depth === 0 && !arrow) {
+        arrow = true;
+        k += 1;
+      } else if (arrow && !/\s/.test(c)) {
+        afterArrow = true;
+      }
+    }
+    const trimmed = code.trim();
+    if (arrow) {
+      if (depth < 0) return i;
+      if (depth <= 0 && trimmed.endsWith(";")) return i;
+      if (afterArrow && depth <= 0 && !ENDS_OPEN.test(trimmed)) {
+        const following = nextCodeLine(masked, raw, i + 1, last);
+        if (following === null || !STARTS_CONTINUING.test(following)) return i;
+      }
+      continue;
+    }
+    if (opened) {
+      if (depth <= 0) return i;
+      continue;
+    }
+    if (depth <= 0 && (trimmed.endsWith(";") || trimmed === "")) return i;
+  }
+  return Math.max(start, last);
+}
+function nextCodeLine(masked, raw, from, last) {
+  for (let i = from; i <= last; i += 1) {
+    const code = (masked[i] ?? "").trim();
+    if (code) return code;
+    const original = raw ? String(raw[i] ?? "").trim() : "";
+    if (!original) return null;
+  }
+  return null;
+}
+function closingIndex(text3, open) {
+  let depth = 0;
+  for (let i = open; i < text3.length; i += 1) {
+    const c = text3[i];
+    if (c === "(" || c === "[" || c === "{") depth += 1;
+    else if (c === ")" || c === "]" || c === "}") {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+// src/symbols/csharp.mjs
+var ACCESS = "(?:public|internal|protected|private|file)";
+var TYPE = new RegExp(
+  `^\\s*(?:\\[[^\\]]*\\]\\s*)*((?:${ACCESS}\\s+){0,2})(?:(?:abstract|sealed|static|partial|readonly|ref|unsafe|new)\\s+)*(record(?:\\s+(?:struct|class))?|class|interface|struct|enum)\\s+([A-Za-z_]\\w*)`
+);
+var METHOD = new RegExp(
+  `^\\s*(?:\\[[^\\]]*\\]\\s*)*((?:${ACCESS}\\s+){0,2})((?:(?:static|virtual|override|abstract|sealed|async|extern|new|partial|unsafe|readonly)\\s+)*)([A-Za-z_][\\w<>,.\\[\\]?]*(?:<[^()]*>)?\\??)\\s+([A-Za-z_]\\w*)\\s*(<[^()]*>)?\\s*(\\((?:[^;]*|.*=>.*))?$`
+);
+var PROPERTY = new RegExp(`^\\s*(?:\\[[^\\]]*\\]\\s*)*(?:${ACCESS})\\b[^(;]*\\{\\s*get\\b`);
+var NOT_A_TYPE = /* @__PURE__ */ new Set([
+  "return",
+  "await",
+  "throw",
+  "yield",
+  "new",
+  "else",
+  "case",
+  "using",
+  "var",
+  "goto",
+  "in",
+  "is",
+  "as",
+  "not",
+  "and",
+  "or",
+  "when",
+  "out",
+  "ref",
+  "params",
+  "checked",
+  "unchecked",
+  "lock",
+  "fixed",
+  "where",
+  "select",
+  "from",
+  "orderby",
+  "group",
+  "join",
+  "let",
+  "into",
+  "on",
+  "equals",
+  "by",
+  "ascending",
+  "descending",
+  "namespace",
+  "static",
+  "async",
+  "virtual",
+  "override",
+  "abstract",
+  "sealed",
+  "extern",
+  "partial",
+  "unsafe",
+  "readonly",
+  "public",
+  "private",
+  "protected",
+  "internal",
+  "delegate",
+  "event",
+  "operator",
+  "implicit",
+  "explicit",
+  "const",
+  "default",
+  "typeof",
+  "nameof",
+  "sizeof"
+]);
+var NOT_A_NAME = /* @__PURE__ */ new Set([
+  "if",
+  "while",
+  "for",
+  "foreach",
+  "switch",
+  "catch",
+  "using",
+  "lock",
+  "fixed",
+  "return",
+  "nameof",
+  "typeof",
+  "sizeof",
+  "default",
+  "when",
+  "new",
+  "operator",
+  "this",
+  "base",
+  "checked",
+  "unchecked"
+]);
+var KIND_FOR = { class: "class", record: "class", struct: "class", interface: "interface", enum: "enum" };
+function extract(lines) {
+  const texts = lines.map((entry) => String(entry.text ?? "").replace(/\r$/, ""));
+  const masked = maskSource(texts, { regex: false, verbatim: true });
+  const lineAt = (index) => lines[Math.min(index, lines.length - 1)]?.line ?? 0;
+  const out = [];
+  const containers = [];
+  for (let i = 0; i < masked.length; i += 1) {
+    while (containers.length && containers[containers.length - 1].end < i) containers.pop();
+    const code = masked[i];
+    if (!code.trim() || PROPERTY.test(code)) continue;
+    let insideMethod = containers.some((frame) => frame.kind === "method");
+    const type = code.match(TYPE);
+    const method = type ? null : code.match(METHOD);
+    const accessWritten = Boolean((type?.[1] ?? method?.[1] ?? "").trim());
+    if (insideMethod && accessWritten) {
+      while (containers.length && containers[containers.length - 1].kind === "method") containers.pop();
+      insideMethod = containers.some((frame) => frame.kind === "method");
+    }
+    const enclosing = containers[containers.length - 1] ?? null;
+    if (type && !insideMethod) {
+      const end2 = bodyEnd(masked, i, { raw: texts });
+      const name18 = type[3].slice(0, MAX_NAME_CHARS);
+      const access2 = type[1];
+      out.push({
+        name: name18,
+        // `record struct Foo` and `record class Foo` are records.
+        kind: KIND_FOR[type[2].split(/\s+/)[0]] ?? "class",
+        line: lines[i].line,
+        signature: signatureAt(texts, masked, i),
+        exported: /\bpublic\b/.test(access2),
+        scope: accessScope(access2, "internal"),
+        container: enclosing?.path ?? null,
+        span: [lines[i].line, lineAt(end2)]
+      });
+      containers.push({ kind: "type", path: enclosing?.path ? `${enclosing.path}.${name18}` : name18, end: end2 });
+      continue;
+    }
+    if (!method || !method[6]) continue;
+    const [, access, , returnType, rawName, generics = ""] = method;
+    if (NOT_A_TYPE.has(returnType) || NOT_A_NAME.has(rawName)) continue;
+    if (!wholeType(returnType) || !balanced(generics)) continue;
+    const local = insideMethod && !access.trim();
+    const end = bodyEnd(masked, i, { raw: texts });
+    if (bodiless(masked, i, end)) continue;
+    const name17 = rawName.slice(0, MAX_NAME_CHARS);
+    const owner = local ? containers.filter((frame) => frame.kind === "method").pop() : enclosing;
+    out.push({
+      name: name17,
+      kind: "method",
+      line: lines[i].line,
+      signature: signatureAt(texts, masked, i),
+      exported: /\bpublic\b/.test(access),
+      scope: local ? "local" : accessScope(access, "private"),
+      container: owner?.path ?? null,
+      span: [lines[i].line, lineAt(end)]
+    });
+    containers.push({ kind: "method", path: owner?.path ? `${owner.path}.${name17}` : name17, end });
+  }
+  return out;
+}
+function bodiless(masked, start, end) {
+  let depth = 0;
+  let opened = false;
+  for (let i = start; i <= end; i += 1) {
+    const code = masked[i] ?? "";
+    for (let k = 0; k < code.length; k += 1) {
+      const c = code[k];
+      if (c === "(") {
+        depth += 1;
+        opened = true;
+      } else if (c === ")") {
+        depth -= 1;
+        if (opened && depth === 0) return /^[^{=]*;/.test(code.slice(k + 1));
+      }
+    }
+  }
+  return false;
+}
+function balanced(text3) {
+  let depth = 0;
+  for (const c of text3) {
+    if (c === "<") depth += 1;
+    else if (c === ">") depth -= 1;
+    if (depth < 0) return false;
+  }
+  return depth === 0;
+}
+function wholeType(type) {
+  return balanced(type) && !/[,.]$/.test(type);
+}
+var MAX_SIGNATURE_LINES = 20;
+function signatureAt(texts, masked, i) {
+  const first = texts[i].trim();
+  let depth = parenDelta(masked[i]);
+  if (depth <= 0) return first.slice(0, 200);
+  const parts = [first];
+  for (let k = i + 1; k < texts.length && k - i < MAX_SIGNATURE_LINES && depth > 0; k += 1) {
+    parts.push(texts[k].trim());
+    depth += parenDelta(masked[k]);
+  }
+  return parts.join(" ").replace(/\s+/g, " ").slice(0, 200);
+}
+function parenDelta(line) {
+  let delta = 0;
+  for (const c of line) {
+    if (c === "(") delta += 1;
+    else if (c === ")") delta -= 1;
+  }
+  return delta;
+}
+function accessScope(access, fallback) {
+  if (/\bpublic\b/.test(access)) return "public";
+  if (/\bprivate\b/.test(access)) return "private";
+  if (/\bprotected\b/.test(access)) return "protected";
+  if (/\binternal\b|\bfile\b/.test(access)) return "internal";
+  return fallback;
+}
+
+// src/symbols/typescript.mjs
+var ID = "[A-Za-z_$][\\w$]*";
+var EXPORT_FUNCTION = new RegExp(`^\\s*export\\s+(?:default\\s+)?(?:async\\s+)?function\\s*\\*?\\s*(${ID})\\s*[(<]`);
+var EXPORT_CLASS = new RegExp(`^\\s*export\\s+(?:default\\s+)?(?:abstract\\s+)?class\\s+(${ID})`);
+var EXPORT_INTERFACE = new RegExp(`^\\s*export\\s+(?:interface|type)\\s+(${ID})`);
+var EXPORT_ENUM = new RegExp(`^\\s*export\\s+(?:const\\s+)?enum\\s+(${ID})`);
+var EXPORT_BINDING = new RegExp(`^\\s*export\\s+(?:const|let|var)\\s+(${ID})\\s*(?::[^=]+)?=\\s*`);
+var LOCAL_FUNCTION = new RegExp(`^\\s*(?:async\\s+)?function\\s*\\*?\\s*(${ID})\\s*[(<]`);
+var LOCAL_CLASS = new RegExp(`^\\s*(?:abstract\\s+)?class\\s+(${ID})`);
+var LOCAL_BINDING = new RegExp(`^\\s*(?:const|let|var)\\s+(${ID})\\s*(?::[^=]+)?=\\s*`);
+var FACTORY = /^(?:defineStore|defineComponent|createStore)\s*\(/;
+var CLASS_METHOD = new RegExp(
+  `^\\s*(?:@[\\w.]+(?:\\([^)]*\\))?\\s+)*((?:(?:public|private|protected|static|readonly|async|override|abstract|declare|get|set|accessor)\\s+)*)\\*?\\s*(#?${ID})\\s*[?!]?\\s*(?:<[^>]*>)?\\s*\\(`
+);
+var CLASS_FIELD = new RegExp(
+  `^\\s*((?:(?:public|private|protected|static|readonly|override|declare)\\s+)*)(#?${ID})\\s*[?!]?\\s*(?::[^=]+)?=\\s*`
+);
+var OBJECT_METHOD = new RegExp(`^\\s*(?:(?:async|get|set)\\s+)?\\*?\\s*(${ID})\\s*(?:<[^>]*>)?\\s*\\(`);
+var OBJECT_KEY = new RegExp(`^\\s*(${ID})\\s*:\\s*`);
+var EXPORT_LIST = /^\s*export\s*\{/;
+var EXPORT_DEFAULT_NAME = new RegExp(`^\\s*export\\s+default\\s+(${ID})\\s*;?\\s*$`);
+var NOT_A_NAME2 = /* @__PURE__ */ new Set([
+  "if",
+  "for",
+  "while",
+  "switch",
+  "catch",
+  "return",
+  "function",
+  "super",
+  "new",
+  "constructor",
+  "typeof",
+  "await",
+  "yield",
+  "throw",
+  "delete",
+  "void",
+  "else",
+  "do",
+  "with",
+  "import",
+  "export"
+]);
+var MAX_HEAD_LINES = 20;
+var MAX_HEAD_CHARS = 4e3;
+function extract2(lines) {
+  const texts = lines.map((entry) => String(entry.text ?? "").replace(/\r$/, ""));
+  const masked = maskSource(texts, { regex: true });
+  const depths = braceDepths(masked);
+  const out = [];
+  const containers = [];
+  const exportedNames = /* @__PURE__ */ new Set();
+  const lineAt = (index) => lines[Math.min(index, lines.length - 1)]?.line ?? 0;
+  for (let i = 0; i < masked.length; i += 1) {
+    while (containers.length && containers[containers.length - 1].end < i) containers.pop();
+    const code = masked[i];
+    if (!code.trim()) continue;
+    const container = containers[containers.length - 1] ?? null;
+    if (EXPORT_LIST.test(code)) {
+      const list = exportListText(masked, i);
+      if (!/\}\s*from\b/.test(list)) {
+        for (const name17 of exportListNames(list)) exportedNames.add(name17);
+      }
+      continue;
+    }
+    const exportDefault = code.match(EXPORT_DEFAULT_NAME);
+    if (exportDefault && !NOT_A_NAME2.has(exportDefault[1])) {
+      exportedNames.add(exportDefault[1]);
+      continue;
+    }
+    const found = declarationAt(masked, i, container, depths);
+    if (found) {
+      const end = bodyEnd(masked, i, { raw: texts });
+      const symbol19 = {
+        name: found.name.replace(/^#/, "").slice(0, MAX_NAME_CHARS),
+        kind: found.kind,
+        line: lines[i].line,
+        signature: signatureAt2(texts, masked, i),
+        exported: found.scope === "exported",
+        scope: found.scope,
+        container: found.container ?? null,
+        span: [lines[i].line, lineAt(end)]
+      };
+      out.push(symbol19);
+      if (found.kind === "class") {
+        containers.push({ kind: "class", path: containerPath(container, symbol19.name), end, bodyDepth: depths[i] + 1 });
+      } else if (found.kind === "function" || found.kind === "method") {
+        const objectBody = found.factory && /[(,]\s*\{\s*$/.test(code);
+        containers.push({
+          kind: objectBody ? "object" : "function",
+          path: containerPath(container, symbol19.name),
+          end,
+          bodyDepth: depths[i] + 1
+        });
+      }
+      continue;
+    }
+    const object3 = objectOpenerAt(code, container);
+    if (object3) {
+      const end = bodyEnd(masked, i, { raw: texts });
+      if (end > i) {
+        containers.push({
+          kind: "object",
+          path: object3.name ? containerPath(container, object3.name) : container?.path ?? null,
+          end,
+          bodyDepth: depths[i] + 1
+        });
+      }
+    }
+  }
+  if (exportedNames.size) {
+    for (const symbol19 of out) {
+      if (symbol19.scope === "module" && exportedNames.has(symbol19.name)) {
+        symbol19.exported = true;
+        symbol19.scope = "exported";
+      }
+    }
+  }
+  return out;
+}
+function containerPath(parent, name17) {
+  if (!name17) return parent?.path ?? null;
+  return parent?.path ? `${parent.path}.${name17}` : name17;
+}
+function declarationAt(masked, i, container, depths) {
+  const code = masked[i];
+  if (/^\s*export\b/.test(code)) return exportedDeclaration(masked, i, code);
+  if (!container) {
+    return localDeclaration(masked, i, code, depths[i] > 0 ? "inner" : "module", null);
+  }
+  if (container.kind === "class") {
+    if (depths[i] !== container.bodyDepth) return null;
+    return classMember(masked, i, code, container);
+  }
+  if (container.kind === "object") {
+    if (depths[i] !== container.bodyDepth) return null;
+    return objectMember(masked, i, code, container);
+  }
+  return localDeclaration(masked, i, code, "inner", container.path);
+}
+function exportedDeclaration(masked, i, code) {
+  let match = code.match(EXPORT_FUNCTION);
+  if (match) return { name: match[1], kind: "function", scope: "exported" };
+  match = code.match(EXPORT_CLASS);
+  if (match) return { name: match[1], kind: "class", scope: "exported" };
+  match = code.match(EXPORT_INTERFACE);
+  if (match) return { name: match[1], kind: "interface", scope: "exported" };
+  match = code.match(EXPORT_ENUM);
+  if (match) return { name: match[1], kind: "enum", scope: "exported" };
+  match = code.match(EXPORT_BINDING);
+  if (match) {
+    const value = valueKind(headText(masked, i), match[0].length);
+    if (value) return { name: match[1], kind: "function", scope: "exported", factory: value === "factory" };
+  }
+  return null;
+}
+function localDeclaration(masked, i, code, scope, container) {
+  let match = code.match(LOCAL_FUNCTION);
+  if (match) return { name: match[1], kind: "function", scope, container };
+  match = code.match(LOCAL_CLASS);
+  if (match) return { name: match[1], kind: "class", scope, container };
+  match = code.match(LOCAL_BINDING);
+  if (match) {
+    const value = valueKind(headText(masked, i), match[0].length);
+    if (value) return { name: match[1], kind: "function", scope, container, factory: value === "factory" };
+  }
+  return null;
+}
+function classMember(masked, i, code, container) {
+  const field = code.match(CLASS_FIELD);
+  if (field && !NOT_A_NAME2.has(field[2])) {
+    const value = valueKind(headText(masked, i), field[0].length);
+    if (value === "function") {
+      return { name: field[2], kind: "method", scope: memberScope(field[1], field[2]), container: container.path };
+    }
+  }
+  const method = code.match(CLASS_METHOD);
+  if (!method || NOT_A_NAME2.has(method[2])) return null;
+  if (!opensBody(headText(masked, i), method[0].length - 1)) return null;
+  return { name: method[2], kind: "method", scope: memberScope(method[1], method[2]), container: container.path };
+}
+function memberScope(modifiers, name17) {
+  if (/\bprivate\b/.test(modifiers) || name17.startsWith("#")) return "private";
+  if (/\bprotected\b/.test(modifiers)) return "protected";
+  return "public";
+}
+function objectMember(masked, i, code, container) {
+  const key = code.match(OBJECT_KEY);
+  if (key && !NOT_A_NAME2.has(key[1])) {
+    const value = valueKind(headText(masked, i), key[0].length);
+    if (value === "function") return { name: key[1], kind: "method", scope: "member", container: container.path };
+    return null;
+  }
+  const method = code.match(OBJECT_METHOD);
+  if (!method || NOT_A_NAME2.has(method[1])) return null;
+  if (!opensBody(headText(masked, i), method[0].length - 1)) return null;
+  return { name: method[1], kind: "method", scope: "member", container: container.path };
+}
+function opensBody(text3, open) {
+  if (text3[open] !== "(") return false;
+  const after = closingIndex(text3, open);
+  if (after === -1) return false;
+  const rest = text3.slice(after).replace(/^\s+/, "");
+  if (rest.startsWith("{")) return true;
+  return rest.startsWith(":") && afterReturnType(rest.slice(1)) === "{";
+}
+function arrowFollows(rest) {
+  const trimmed = rest.replace(/^\s+/, "");
+  if (trimmed.startsWith("=>")) return true;
+  return trimmed.startsWith(":") && afterReturnType(trimmed.slice(1)) === "=>";
+}
+function afterReturnType(text3) {
+  let depth = 0;
+  let sawType = false;
+  for (let k = 0; k < text3.length; k += 1) {
+    const c = text3[k];
+    if (c === "=" && text3[k + 1] === ">") {
+      if (depth === 0 && sawType) return "=>";
+      k += 1;
+      continue;
+    }
+    if (c === "{" && depth === 0 && sawType && !continuesType(text3.slice(0, k))) return "{";
+    if (c === "(" || c === "[" || c === "<" || c === "{") depth += 1;
+    else if (c === ")" || c === "]" || c === ">" || c === "}") depth -= 1;
+    else if ((c === ";" || c === "=") && depth <= 0) return null;
+    if (depth < 0) return null;
+    if (!/\s/.test(c)) sawType = true;
+  }
+  return null;
+}
+function continuesType(before) {
+  const tail = before.trimEnd();
+  if (/[&|,?:]$/.test(tail)) return true;
+  return /(?:^|[^\w$])(?:is|keyof|typeof|readonly|extends|infer|asserts)$/.test(tail);
+}
+function valueKind(text3, at) {
+  const value = text3.slice(at).replace(/^\s+/, "");
+  if (/^(?:async\s+)?function\b/.test(value)) return "function";
+  if (new RegExp(`^(?:async\\s+)?${ID}\\s*=>`).test(value)) return "function";
+  if (FACTORY.test(value)) return "factory";
+  const params = value.match(/^(?:async\s*)?(?:<[^>]*>\s*)?\(/);
+  if (!params) return null;
+  const open = params[0].length - 1;
+  const after = closingIndex(value, open);
+  if (after === -1) return null;
+  return arrowFollows(value.slice(after)) ? "function" : null;
+}
+function headText(masked, i) {
+  let text3 = masked[i];
+  let depth = bracketDelta(masked[i], true);
+  let k = i + 1;
+  while (k < masked.length && k - i < MAX_HEAD_LINES && text3.length < MAX_HEAD_CHARS) {
+    const tail = text3.trimEnd();
+    const settled = depth <= 0 && !/(?:=>|[=:(,|&?])$/.test(tail);
+    if (settled) break;
+    text3 += `
+${masked[k]}`;
+    depth += bracketDelta(masked[k], true);
+    k += 1;
+  }
+  return text3.slice(0, MAX_HEAD_CHARS);
+}
+function bracketDelta(line, braces = false) {
+  let delta = 0;
+  for (const c of line) {
+    if (c === "(" || c === "[" || braces && c === "{") delta += 1;
+    else if (c === ")" || c === "]" || braces && c === "}") delta -= 1;
+  }
+  return delta;
+}
+function signatureAt2(texts, masked, i) {
+  const first = texts[i].trim();
+  let depth = bracketDelta(masked[i]);
+  if (depth <= 0) return first.slice(0, 200);
+  const parts = [first];
+  for (let k = i + 1; k < texts.length && k - i < MAX_HEAD_LINES && depth > 0; k += 1) {
+    parts.push(texts[k].trim());
+    depth += bracketDelta(masked[k]);
+  }
+  return parts.join(" ").replace(/\s+/g, " ").slice(0, 200);
+}
+function exportListText(masked, i) {
+  let text3 = masked[i];
+  for (let k = i + 1; k < masked.length && k - i < MAX_HEAD_LINES && !text3.includes("}"); k += 1) {
+    text3 += `
+${masked[k]}`;
+  }
+  return text3;
+}
+function exportListNames(text3) {
+  const open = text3.indexOf("{");
+  const close = text3.indexOf("}", open);
+  if (open === -1 || close === -1) return [];
+  return text3.slice(open + 1, close).split(",").map((part) => part.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0].trim()).filter((name17) => new RegExp(`^${ID}$`).test(name17));
+}
+function objectOpenerAt(code, container) {
+  const trimmed = code.trimEnd();
+  if (!trimmed.endsWith("{")) return null;
+  const before = trimmed.slice(0, -1).trimEnd();
+  const opensObject = /(?:[=:(,[?]|\breturn|\bdefault)$/.test(before) && !/=>$/.test(before);
+  if (!opensObject) return null;
+  if (container?.kind === "function" && !/^\s*return\b/.test(code)) {
+    const binding = code.match(LOCAL_BINDING);
+    if (!binding) return null;
+    return { name: binding[1] };
+  }
+  let match = code.match(/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)/);
+  if (match) return { name: match[1] };
+  match = code.match(new RegExp(`^\\s*(${ID})\\s*:`));
+  if (match) return { name: match[1] };
+  if (/^\s*export\s+default\b/.test(code)) return { name: "default" };
+  return { name: null };
+}
+
+// src/symbols/vue.mjs
+var MAX_SKELETON_TOKENS = 400;
+function componentNameFromPath(path) {
+  const file2 = String(path || "").split("/").pop() ?? "";
+  const base = file2.replace(/\.vue$/i, "");
+  if (!base) return "";
+  return base.split(/[-_.]/).filter(Boolean).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("");
+}
+function scriptBlocks(lines) {
+  const blocks = [];
+  let current = null;
+  for (const entry of lines) {
+    const text3 = String(entry.text ?? "").replace(/\r$/, "");
+    if (!current) {
+      const open = text3.match(/^\s*<script\b([^>]*)>(.*)$/i);
+      if (!open) continue;
+      current = { setup: /\bsetup\b/.test(open[1]), lines: [] };
+      const rest = open[2];
+      const close2 = rest.search(/<\/script\s*>/i);
+      if (close2 !== -1) {
+        if (rest.slice(0, close2).trim()) current.lines.push({ line: entry.line, text: rest.slice(0, close2) });
+        blocks.push(current);
+        current = null;
+      } else if (rest.trim()) {
+        current.lines.push({ line: entry.line, text: rest });
+      }
+      continue;
+    }
+    const close = text3.search(/<\/script\s*>/i);
+    if (close !== -1) {
+      if (text3.slice(0, close).trim()) current.lines.push({ line: entry.line, text: text3.slice(0, close) });
+      blocks.push(current);
+      current = null;
+      continue;
+    }
+    current.lines.push(entry);
+  }
+  if (current) blocks.push(current);
+  return blocks.length ? blocks : null;
+}
+function templateSkeleton(lines) {
+  const texts = lines.map((entry) => String(entry.text ?? "").replace(/\r$/, ""));
+  const start = texts.findIndex((text3) => /^\s*<template\b/i.test(text3));
+  if (start === -1) return null;
+  let end = -1;
+  for (let i = texts.length - 1; i > start; i -= 1) {
+    if (/<\/template\s*>/i.test(texts[i])) {
+      end = i;
+      break;
+    }
+  }
+  const body = texts.slice(start, end === -1 ? texts.length : end + 1).join("\n").replace(/<!--[\s\S]*?-->/g, " ");
+  const tokens = [];
+  const tag = /<(\/?)([A-Za-z][\w.:-]*)((?:"[^"]*"|'[^']*'|[^'">])*?)(\/?)>/g;
+  for (const match of body.matchAll(tag)) {
+    tokens.push(`${match[1]}${match[2]}${match[4]}`);
+    if (tokens.length > MAX_SKELETON_TOKENS + 2) break;
+  }
+  if (tokens[0] === "template") tokens.shift();
+  if (tokens[tokens.length - 1] === "/template") tokens.pop();
+  return tokens.slice(0, MAX_SKELETON_TOKENS).join(" ");
+}
+function extract3(lines, path = "") {
+  const name17 = componentNameFromPath(path).slice(0, MAX_NAME_CHARS);
+  const out = [];
+  if (name17 && lines.length) {
+    const component = {
+      name: name17,
+      kind: "component",
+      line: lines[0].line,
+      signature: `<${name17} />`,
+      exported: true,
+      scope: "exported",
+      container: null,
+      span: [lines[0].line, lines[lines.length - 1].line]
+    };
+    const skeleton = templateSkeleton(lines);
+    if (skeleton !== null) component.templateSkeleton = skeleton;
+    out.push(component);
+  }
+  const blocks = scriptBlocks(lines);
+  if (!blocks) {
+    out.push(...extract2(lines));
+    return out;
+  }
+  for (const block of blocks) {
+    for (const symbol19 of extract2(block.lines)) {
+      out.push(block.setup ? asSetupSymbol(symbol19, name17) : asOptionsSymbol(symbol19, name17));
+    }
+  }
+  return out;
+}
+function asSetupSymbol(symbol19, component) {
+  if (symbol19.scope === "module") {
+    return { ...symbol19, scope: "private", container: component || null };
+  }
+  if (symbol19.container === null && symbol19.scope === "inner") {
+    return { ...symbol19, container: component || null };
+  }
+  return symbol19;
+}
+function asOptionsSymbol(symbol19, component) {
+  if (!component || typeof symbol19.container !== "string") return symbol19;
+  if (symbol19.container !== "default" && !symbol19.container.startsWith("default.")) return symbol19;
+  return { ...symbol19, container: component + symbol19.container.slice("default".length) };
+}
+
+// src/symbols/php.mjs
+var TYPE2 = /^\s*(?:(?:final|abstract|readonly)\s+)*(class|interface|trait|enum)\s+([A-Za-z_]\w*)/;
+var METHOD2 = /^\s*(?:(?:final|abstract|static)\s+)*(?:(public|protected|private)\s+)?(?:(?:final|abstract|static)\s+)*function\s+&?\s*([A-Za-z_]\w*)\s*\(/;
+var KIND_FOR2 = { class: "class", interface: "interface", trait: "class", enum: "enum" };
+var MAGIC = /^__/;
+function extract4(lines) {
+  const out = [];
+  for (const { line, text: text3 } of lines) {
+    const type = text3.match(TYPE2);
+    if (type) {
+      out.push({
+        name: type[2].slice(0, MAX_NAME_CHARS),
+        kind: KIND_FOR2[type[1]] ?? "class",
+        line,
+        signature: text3.trim().slice(0, 200),
+        exported: true
+      });
+      continue;
+    }
+    const method = text3.match(METHOD2);
+    if (!method || MAGIC.test(method[2])) continue;
+    const visibility = method[1] ?? "public";
+    if (visibility === "private") continue;
+    out.push({
+      name: method[2].slice(0, MAX_NAME_CHARS),
+      kind: "method",
+      line,
+      signature: text3.trim().slice(0, 200),
+      exported: visibility === "public"
+    });
+  }
+  return out;
+}
+
+// src/symbols/index.mjs
+var EXTRACTORS = [
+  [/\.cs$/i, extract],
+  [/\.vue$/i, extract3],
+  [/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i, extract2],
+  [/\.php$/i, extract4]
+];
+function extractorFor(path) {
+  for (const [pattern, extractor] of EXTRACTORS) {
+    if (pattern.test(String(path || ""))) return extractor;
+  }
+  return null;
+}
+function walkDiff(diffText, visit) {
+  let path = null;
+  let lineNumber = 0;
+  let inHunk = false;
+  for (const raw of String(diffText || "").split("\n")) {
+    if (raw.startsWith("diff --git ")) {
+      path = null;
+      inHunk = false;
+      continue;
+    }
+    const fileHeader = inHunk ? null : raw.match(/^\+\+\+ b\/(.+)$/);
+    if (fileHeader) {
+      path = fileHeader[1] === "dev/null" ? null : fileHeader[1];
+      continue;
+    }
+    const hunk = raw.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      lineNumber = Number(hunk[1]);
+      inHunk = true;
+      continue;
+    }
+    if (!path) continue;
+    if (raw.startsWith("+")) {
+      visit(path, "added", lineNumber, raw.slice(1));
+      lineNumber += 1;
+    } else if (raw.startsWith("-")) {
+      if (inHunk) visit(path, "removed", lineNumber, raw.slice(1));
+    } else if (raw.startsWith("\\")) {
+    } else if (raw.startsWith(" ")) {
+      lineNumber += 1;
+    }
+  }
+}
+function addedLinesByFile(diffText) {
+  const byFile = /* @__PURE__ */ new Map();
+  walkDiff(diffText, (path, type, line, text3) => {
+    if (type !== "added") return;
+    const list = byFile.get(path) ?? [];
+    list.push({ line, text: text3 });
+    byFile.set(path, list);
+  });
+  return byFile;
+}
+function changedLinesByFile(diffText) {
+  const byFile = /* @__PURE__ */ new Map();
+  walkDiff(diffText, (path, type, line) => {
+    let entry = byFile.get(path);
+    if (!entry) {
+      entry = { added: /* @__PURE__ */ new Set(), removed: /* @__PURE__ */ new Set() };
+      byFile.set(path, entry);
+    }
+    entry[type].add(line);
+  });
+  return byFile;
+}
+function spanChange(symbol19, changes) {
+  if (!changes) return null;
+  const start = Number(symbol19.line);
+  const rawEnd = Array.isArray(symbol19.span) ? Number(symbol19.span[1]) : start;
+  const end = Math.max(start, Number.isFinite(rawEnd) ? rawEnd : start);
+  if (changes.added.has(start)) return "added";
+  for (const line of changes.added) {
+    if (line > start && line <= end) return "modified";
+  }
+  for (const line of changes.removed) {
+    if (line > start && line <= end) return "modified";
+  }
+  return null;
+}
+function withDefaults(symbol19, path) {
+  return {
+    ...symbol19,
+    path,
+    scope: symbol19.scope ?? (symbol19.exported ? "exported" : "protected"),
+    container: symbol19.container ?? null,
+    span: Array.isArray(symbol19.span) ? symbol19.span : [symbol19.line, symbol19.line]
+  };
+}
+function symbolsFromDiff(diffText) {
+  const out = [];
+  for (const [path, lines] of addedLinesByFile(diffText)) {
+    const extractor = extractorFor(path);
+    if (!extractor) continue;
+    for (const symbol19 of extractor(lines, path)) {
+      if (symbol19.exported) out.push(withDefaults(symbol19, path));
+    }
+  }
+  return out;
+}
+
+// src/context/symbol-index.mjs
+var MAX_INDEXED_FILES = 4e3;
+var MAX_FILE_CHARS = 4e5;
+var MAX_INDEXED_SYMBOLS = 12e4;
+var MAX_BODY_LINES = 40;
+var MAX_BODY_CHARS = 16e3;
+var CACHE_VERSION = 2;
+var CACHE_FILE = "symbol-index.json";
+var MAX_IGNORE_LOOKBACK = 6;
+var IGNORE = /pr-validator-ignore\s+duplication\b(?:\s*:\s*(.*))?/;
+function git2(repo, args) {
+  return execFileSync2("git", ["-C", repo, ...args], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+}
+function indexableFiles(repo = ".") {
+  let listing;
+  try {
+    listing = git2(repo, ["ls-files", "--cached", "--others", "--exclude-standard"]);
+  } catch {
+    return [];
+  }
+  return listing.split("\n").map((line) => line.trim()).filter(Boolean).filter((path) => extractorFor(path) !== null);
+}
+function clip(lines, start, end, maxLines, maxChars) {
+  const collected = [];
+  let used = 0;
+  for (let i = start; i <= end && i < lines.length && collected.length < maxLines && used < maxChars; i += 1) {
+    const room = maxChars - used;
+    const whole = lines[i];
+    const line = whole.length > room ? whole.slice(0, room) : whole;
+    collected.push(line);
+    used += line.length;
+  }
+  return collected;
+}
+function bodyLines(lines, startIndex, maxLines = MAX_BODY_LINES, maxChars = MAX_BODY_CHARS) {
+  const window2 = lines.slice(startIndex, startIndex + maxLines).map((line) => line.slice(0, maxChars));
+  const masked = maskSource(window2, { regex: true, verbatim: true });
+  const end = startIndex + bodyEnd(masked, 0, { raw: window2 });
+  return clip(lines, startIndex, end, maxLines, maxChars);
+}
+function inlineIgnore(lines, index) {
+  for (let i = index; i >= 0 && index - i <= MAX_IGNORE_LOOKBACK; i -= 1) {
+    const text3 = String(lines[i] ?? "");
+    if (i < index) {
+      const trimmed = text3.trim();
+      const annotation = /^(?:\/\/|\/\*|\*|#|<!--|\[|@)/.test(trimmed);
+      if (!annotation) break;
+    }
+    const match = text3.match(IGNORE);
+    if (!match) continue;
+    const reason = String(match[1] ?? "").replace(/\s*(?:\*\/|-->)\s*$/, "").trim();
+    return reason ? { reason: reason.slice(0, 300), line: i + 1 } : { invalid: true, line: i + 1 };
+  }
+  return null;
+}
+function readCache(cacheDir) {
+  if (!cacheDir) return null;
+  try {
+    const parsed = JSON.parse(readFileSync2(join2(cacheDir, CACHE_FILE), "utf8"));
+    if (parsed?.version !== CACHE_VERSION || typeof parsed.files !== "object" || !parsed.files) return {};
+    return parsed.files;
+  } catch {
+    return {};
+  }
+}
+function writeCache(cacheDir, files) {
+  if (!cacheDir) return;
+  try {
+    mkdirSync(cacheDir, { recursive: true });
+    writeFileSync(join2(cacheDir, CACHE_FILE), JSON.stringify({ version: CACHE_VERSION, files }));
+  } catch {
+  }
+}
+function symbolsOfFile(path, content) {
+  const extractor = extractorFor(path);
+  const rawLines = content.split("\n");
+  const numbered = rawLines.map((text3, index) => ({ line: index + 1, text: text3 }));
+  const out = [];
+  for (const extracted of extractor(numbered, path)) {
+    const symbol19 = withDefaults(extracted, path);
+    const start = symbol19.line - 1;
+    const end = Math.max(start, Number(symbol19.span[1]) - 1);
+    const entry = {
+      ...symbol19,
+      body: clip(rawLines, start, end, MAX_BODY_LINES, MAX_BODY_CHARS).join("\n")
+    };
+    const ignore = inlineIgnore(rawLines, start);
+    if (ignore) entry.ignore = ignore;
+    out.push(entry);
+  }
+  return out;
+}
+function buildSymbolIndex({ repo = ".", exclude = () => false, cacheDir = null, deadline = null } = {}) {
+  const all = indexableFiles(repo);
+  const files = all.filter((path) => !exclude(path));
+  const truncated = files.length > MAX_INDEXED_FILES;
+  const selected = truncated ? files.slice(0, MAX_INDEXED_FILES) : files;
+  const cached2 = readCache(cacheDir);
+  const nextCache = cacheDir ? {} : null;
+  const symbols = [];
+  let read = 0;
+  let skipped = all.length - selected.length;
+  let symbolsTruncated = false;
+  let timedOut = false;
+  for (const path of selected) {
+    if (deadline !== null && Date.now() >= deadline) {
+      timedOut = true;
+      break;
+    }
+    const full = join2(repo, path);
+    if (!isRegularFileWithin(full, repo)) {
+      skipped += 1;
+      continue;
+    }
+    try {
+      if (statSync(full).size > MAX_FILE_CHARS) {
+        skipped += 1;
+        continue;
+      }
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    let content;
+    try {
+      content = readFileSync2(full, "utf8");
+    } catch {
+      continue;
+    }
+    if (content.length > MAX_FILE_CHARS) continue;
+    read += 1;
+    let fileSymbols;
+    if (cached2) {
+      const hash2 = createHash("sha256").update(content).digest("hex");
+      const hit = cached2[path];
+      fileSymbols = hit && hit.hash === hash2 && Array.isArray(hit.symbols) ? hit.symbols : symbolsOfFile(path, content);
+      nextCache[path] = { hash: hash2, symbols: fileSymbols };
+    } else {
+      fileSymbols = symbolsOfFile(path, content);
+    }
+    for (const symbol19 of fileSymbols) symbols.push(symbol19);
+    if (symbols.length >= MAX_INDEXED_SYMBOLS) {
+      symbolsTruncated = true;
+      break;
+    }
+  }
+  writeCache(cacheDir, nextCache);
+  return {
+    symbols,
+    fileCount: read,
+    skippedFiles: skipped,
+    truncated: truncated || symbolsTruncated || timedOut,
+    timedOut
+  };
+}
+
+// src/similarity/body.mjs
+var KEYWORDS = /* @__PURE__ */ new Set([
+  "if",
+  "else",
+  "for",
+  "foreach",
+  "while",
+  "do",
+  "switch",
+  "case",
+  "default",
+  "break",
+  "continue",
+  "return",
+  "throw",
+  "try",
+  "catch",
+  "finally",
+  "new",
+  "await",
+  "yield",
+  "null",
+  "true",
+  "false",
+  "this",
+  "self",
+  "typeof",
+  "instanceof",
+  "in",
+  "of",
+  "as",
+  "is"
+]);
+var SHINGLE = 4;
+var MIN_TOKENS = 8;
+var MAX_BODY_CHARS2 = 2e4;
+function normalizeBody(body) {
+  const stripped = String(body || "").slice(0, MAX_BODY_CHARS2).replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ").replace(/(^|\s)#[^\n]*/g, "$1 ").replace(/"(?:[^"\\]|\\.)*"/g, ' "S" ').replace(/'(?:[^'\\]|\\.)*'/g, ' "S" ').replace(/`(?:[^`\\]|\\.)*`/g, ' "S" ').replace(/\b\d[\d_.]*\b/g, " 0 ");
+  const tokens = [];
+  const pattern = /[A-Za-z_$][\w$]*|[{}()[\];,.=<>+\-*/%!&|?:]/g;
+  for (const [match] of stripped.matchAll(pattern)) {
+    if (/^[A-Za-z_$]/.test(match)) {
+      const lower = match.toLowerCase();
+      tokens.push(KEYWORDS.has(lower) ? lower : "X");
+    } else {
+      tokens.push(match);
+    }
+  }
+  return tokens;
+}
+function shingles(tokens, size = SHINGLE) {
+  const out = /* @__PURE__ */ new Set();
+  for (let i = 0; i + size <= tokens.length; i += 1) {
+    out.add(tokens.slice(i, i + size).join(" "));
+  }
+  return out;
+}
+function bodySimilarity(a, b, table = null) {
+  const left = normalizeBody(a);
+  const right = normalizeBody(b);
+  if (left.length < MIN_TOKENS || right.length < MIN_TOKENS) return 0;
+  return weightedJaccard(shingles(left), shingles(right), table);
+}
+var IDF_MIN_DOCUMENTS = 20;
+var COMMON_SHINGLE_RATE = 0.05;
+function defaultShinglesOf(symbol19) {
+  return shingles(normalizeBody(symbol19?.body ?? ""));
+}
+function buildDocumentFrequency(symbols = [], shinglesOf = defaultShinglesOf) {
+  const counts = /* @__PURE__ */ new Map();
+  let documents = 0;
+  for (const symbol19 of symbols) {
+    const set2 = shinglesOf(symbol19);
+    if (!set2 || !set2.size) continue;
+    documents += 1;
+    for (const shingle of set2) counts.set(shingle, (counts.get(shingle) ?? 0) + 1);
+  }
+  return { documents, counts };
+}
+function shingleWeight(shingle, table) {
+  if (!table || table.documents < IDF_MIN_DOCUMENTS) return 1;
+  const others = Math.max(0, (table.counts.get(shingle) ?? 0) - 1);
+  const rate = others / table.documents;
+  if (rate <= COMMON_SHINGLE_RATE) return 1;
+  return Math.log(1 / rate) / Math.log(1 / COMMON_SHINGLE_RATE);
+}
+function totalWeight(set2, table) {
+  if (!table || table.documents < IDF_MIN_DOCUMENTS) return set2.size;
+  let total = 0;
+  for (const shingle of set2) total += shingleWeight(shingle, table);
+  return total;
+}
+function weightedJaccard(left, right, table = null) {
+  if (!left.size || !right.size) return 0;
+  if (!table || table.documents < IDF_MIN_DOCUMENTS) {
+    let shared2 = 0;
+    for (const shingle of left) if (right.has(shingle)) shared2 += 1;
+    return shared2 / (left.size + right.size - shared2);
+  }
+  let shared = 0;
+  let union2 = 0;
+  for (const shingle of left) {
+    const weight = shingleWeight(shingle, table);
+    union2 += weight;
+    if (right.has(shingle)) shared += weight;
+  }
+  for (const shingle of right) {
+    if (!left.has(shingle)) union2 += shingleWeight(shingle, table);
+  }
+  return union2 > 0 ? shared / union2 : 0;
+}
+function stripCode(text3) {
+  const src = String(text3 || "").slice(0, MAX_BODY_CHARS2);
+  const out = [];
+  let regexLiterals = 0;
+  let last = "";
+  let word = "";
+  let lastWord = "";
+  const emit = (chunk, significant) => {
+    out.push(chunk);
+    if (significant) last = significant;
+  };
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (/[\w$]/.test(c)) {
+      word += c;
+      emit(c, c);
+      i += 1;
+      continue;
+    }
+    if (word) {
+      lastWord = word;
+      word = "";
+    }
+    if (c === "/" && next === "/") {
+      let j = i + 2;
+      while (j < src.length && src[j] !== "\n") j += 1;
+      emit(" ", null);
+      i = j;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      const end = src.indexOf("*/", i + 2);
+      const stop = end === -1 ? src.length : end + 2;
+      const lines = countNewlines(src, i, stop);
+      emit(lines ? "\n".repeat(lines) : " ", null);
+      i = stop;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      const verbatim = c === '"' && (src[i - 1] === "@" || src[i - 1] === "$" && src[i - 2] === "@");
+      let j = i + 1;
+      let lines = 0;
+      while (j < src.length) {
+        const ch = src[j];
+        if (!verbatim && ch === "\\") {
+          j += 2;
+          continue;
+        }
+        if (verbatim && ch === '"' && src[j + 1] === '"') {
+          j += 2;
+          continue;
+        }
+        if (ch === c) {
+          j += 1;
+          break;
+        }
+        if (ch === "\n") {
+          if (c !== "`" && !verbatim) break;
+          lines += 1;
+        }
+        j += 1;
+      }
+      emit(`""${"\n".repeat(lines)}`, '"');
+      i = j;
+      continue;
+    }
+    if (c === "/" && regexMayStart(last, lastWord)) {
+      const end = regexEnd(src, i);
+      if (end !== -1) {
+        regexLiterals += 1;
+        emit(" __regex__ ", "_");
+        i = end;
+        continue;
+      }
+    }
+    emit(c, /\s/.test(c) ? null : c);
+    i += 1;
+  }
+  return { code: out.join(""), regexLiterals };
+}
+function countNewlines(src, from, to) {
+  let lines = 0;
+  for (let k = from; k < to; k += 1) if (src[k] === "\n") lines += 1;
+  return lines;
+}
+var REGEX_AFTER_WORD = /* @__PURE__ */ new Set(["return", "typeof", "case", "do", "else", "in", "of", "yield", "await", "void", "delete", "throw"]);
+function regexMayStart(last, lastWord) {
+  if (last === "") return true;
+  if (/[\w$]/.test(last)) return REGEX_AFTER_WORD.has(lastWord);
+  return "(,=:[!&|?{;+-*%~^".includes(last);
+}
+function regexEnd(src, start) {
+  let inClass = false;
+  for (let j = start + 1; j < src.length; j += 1) {
+    const ch = src[j];
+    if (ch === "\n") return -1;
+    if (ch === "\\") {
+      j += 1;
+      continue;
+    }
+    if (ch === "[") inClass = true;
+    else if (ch === "]") inClass = false;
+    else if (ch === "/" && !inClass) {
+      if (j === start + 1) return -1;
+      let k = j + 1;
+      while (k < src.length && /[a-z]/.test(src[k])) k += 1;
+      return k;
+    }
+  }
+  return -1;
+}
+var KNOWN_GLOBALS = /* @__PURE__ */ new Set([
+  "intl",
+  "math",
+  "mathf",
+  "date",
+  "json",
+  "number",
+  "object",
+  "array",
+  "string",
+  "console",
+  "promise",
+  "reflect",
+  "symbol",
+  "datetime",
+  "datetimeoffset",
+  "dateonly",
+  "timeonly",
+  "timespan",
+  "timezoneinfo",
+  "cultureinfo",
+  "convert",
+  "regex",
+  "guid",
+  "enumerable",
+  "decimal",
+  "encoding",
+  "moment",
+  "dayjs",
+  "window",
+  "document",
+  "localstorage",
+  "sessionstorage",
+  "url",
+  "urlsearchparams",
+  "buffer",
+  "crypto"
+]);
+var NOT_CALLEES = /* @__PURE__ */ new Set([
+  "if",
+  "for",
+  "foreach",
+  "while",
+  "switch",
+  "catch",
+  "return",
+  "function",
+  "typeof",
+  "await",
+  "new",
+  "sizeof",
+  "nameof",
+  "using",
+  "lock",
+  "base",
+  "this",
+  "super",
+  "constructor",
+  "async",
+  "yield",
+  "throw",
+  "when",
+  "with",
+  "fixed",
+  "checked",
+  "unchecked",
+  "default",
+  "in",
+  "of",
+  "and",
+  "or",
+  "not"
+]);
+function vocabulary(body, { exclude = [] } = {}) {
+  const { code } = stripCode(body);
+  const skip = new Set(exclude.filter(Boolean).map((name17) => String(name17).toLowerCase()));
+  const out = /* @__PURE__ */ new Set();
+  const add = (word) => {
+    const lower = word.toLowerCase();
+    if (!skip.has(lower) && !NOT_CALLEES.has(lower)) out.add(lower);
+  };
+  for (const match of code.matchAll(/[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*)+/g)) {
+    const parts = match[0].split(".").map((part) => part.replace(/[\s?]/g, ""));
+    let k = match.index - 1;
+    while (k >= 0 && /[\s?]/.test(code[k])) k -= 1;
+    const afterDot = code[k] === ".";
+    const [root, ...members] = parts;
+    if (afterDot) {
+      add(root);
+    } else if (KNOWN_GLOBALS.has(root.toLowerCase())) {
+      add(root);
+      if (members[0]) out.add(`${root}.${members[0]}`.toLowerCase());
+    }
+    for (const member of members) add(member);
+  }
+  for (const match of code.matchAll(/([A-Za-z_$][\w$]*)\s*(?:<[^<>()]{0,200}>)?\s*\(/g)) {
+    add(match[1]);
+  }
+  for (const match of code.matchAll(/\bnew\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)/g)) {
+    const parts = match[1].split(".");
+    for (const part of parts) {
+      if (part === parts[0] && parts.length > 1 && !KNOWN_GLOBALS.has(part.toLowerCase())) continue;
+      add(part);
+    }
+  }
+  return out;
+}
+function vocabularySimilarity(left, right) {
+  if (!left.size || !right.size) return 0;
+  let shared = 0;
+  for (const word of left) if (right.has(word)) shared += 1;
+  return shared / (left.size + right.size - shared);
+}
+
+// src/similarity/signature.mjs
+var MODIFIERS = /\b(public|private|protected|internal|static|virtual|override|abstract|sealed|async|export|default|function|const|let|var|readonly|final|new|partial|unsafe|extern)\b/g;
+function paramText(signature) {
+  const open = signature.indexOf("(");
+  if (open === -1) return null;
+  let depth = 0;
+  for (let i = open; i < signature.length; i += 1) {
+    if (signature[i] === "(") depth += 1;
+    else if (signature[i] === ")") {
+      depth -= 1;
+      if (depth === 0) return signature.slice(open + 1, i);
+    }
+  }
+  return signature.slice(open + 1);
+}
+function splitParams(text3) {
+  const parts = [];
+  let depth = 0;
+  let current = "";
+  for (const char of text3) {
+    if (char === "<" || char === "(" || char === "[") depth += 1;
+    else if (char === ">" || char === ")" || char === "]") depth -= 1;
+    if (char === "," && depth <= 0) {
+      parts.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  parts.push(current);
+  return parts.map((part) => part.trim()).filter(Boolean);
+}
+function normalizeSignature(signature) {
+  const raw = String(signature || "").replace(/\[[^\]]*\]/g, " ").replace(/=>.*$/, "").replace(/\{.*$/, "").replace(MODIFIERS, " ").trim();
+  const params = paramText(raw);
+  const before = params === null ? raw : raw.slice(0, raw.indexOf("("));
+  const types = params === null ? [] : splitParams(params).map(paramType);
+  const annotated = raw.match(/\)\s*:\s*([A-Za-z_][\w<>,.\[\]?| ]*)/);
+  const leading = before.trim().split(/\s+/).filter(Boolean);
+  const returns = annotated ? clean(annotated[1]) : leading.length > 1 ? clean(leading[leading.length - 2]) : "";
+  return { arity: params === null ? null : types.length, types, returns };
+}
+function paramType(param) {
+  const stripped = param.replace(/=.*$/, "").trim();
+  const annotated = stripped.match(/:\s*(.+)$/);
+  if (annotated) return clean(annotated[1]);
+  const words = stripped.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return clean(words[words.length - 2]);
+  return "";
+}
+function clean(type) {
+  return String(type).replace(/[?\s]/g, "").replace(/^\$/, "").toLowerCase();
+}
+function signatureSimilarity(a, b) {
+  const left = normalizeSignature(a);
+  const right = normalizeSignature(b);
+  if (left.arity === null || right.arity === null) return 0;
+  if (left.arity !== right.arity) return 0;
+  let score = 0.4;
+  if (left.arity > 0) {
+    let matched = 0;
+    for (let i = 0; i < left.arity; i += 1) {
+      if (!left.types[i] || !right.types[i]) matched += 0.5;
+      else if (left.types[i] === right.types[i]) matched += 1;
+    }
+    score += 0.4 * (matched / left.arity);
+  } else {
+    score += 0.4;
+  }
+  if (left.returns && right.returns && left.returns === right.returns) score += 0.2;
+  else if (!left.returns || !right.returns) score += 0.1;
+  return Math.min(1, score);
+}
+
+// src/similarity/metrics.mjs
+var CONTROL = /* @__PURE__ */ new Set(["if", "else", "for", "foreach", "while", "do", "switch", "try", "catch", "finally", "using", "lock"]);
+var BRANCH_KEYWORDS = /\b(?:if|case|catch|for|foreach|while)\b/g;
+var BRANCH_OPERATORS = /&&|\|\||\?\?/g;
+var TERNARY = /(?<=\s)\?(?=\s)/g;
+var LOOP = /\b(?:for|foreach|while|do)\b|\.(?:forEach|ForEach|reduce|reduceRight|Aggregate)\s*\(/;
+var DATE_OPS = new RegExp(
+  [
+    String.raw`\bnew\s+Date\b`,
+    String.raw`\bDate\s*\.\s*(?:now|parse|UTC)\b`,
+    String.raw`\b(?:DateTime|DateTimeOffset|DateOnly|TimeOnly|TimeSpan|TimeZoneInfo)\b`,
+    String.raw`\b(?:moment|dayjs)\s*[.(]`,
+    String.raw`\.(?:toISOString|getTime|getFullYear|getMonth|getDate|getDay|getHours|getMinutes|getSeconds|getUTC\w+|setDate|setMonth|setFullYear|setHours|setMinutes|toLocaleDateString|toLocaleTimeString|toDateString|getTimezoneOffset)\s*\(`,
+    String.raw`\.(?:AddDays|AddMonths|AddYears|AddHours|AddMinutes|AddSeconds|ToUniversalTime|ToLocalTime)\s*\(`,
+    String.raw`\b(?:differenceIn\w+|addDays|subDays|addMonths|startOf\w*|endOf\w*|isBefore|isAfter|parseISO|formatISO)\s*\(`
+  ].join("|")
+);
+var REGEX_OPS = /\b(?:RegExp|Regex)\b|__regex__|\.(?:test|exec|matchAll)\s*\(/;
+var MATH_OPS = /\bMathF?\s*\.|\b[Dd]ecimal\s*\.\s*(?:Round|Floor|Ceiling|Truncate)\b/;
+var CURRENCY_OPS = /\bIntl\s*\.|\bNumberFormat\b|\bCultureInfo\b|\.(?:toFixed|toPrecision|toLocaleString)\s*\(|\bcurrency\b/;
+var PARSE_OPS = /\b(?:parseInt|parseFloat)\s*\(|\bJSON\s*\.\s*parse\b|\bNumber\s*\(|\.(?:Parse|TryParse|ParseExact|TryParseExact)\s*\(|\bConvert\s*\.\s*To\w+\s*\(|\.parse\s*\(/;
+var ARITHMETIC = /(?<![\w$.])([A-Za-z_$][\w$.]*|[)\]])\s*([+\-*/%])(?![+\-=>*/])\s*(?=[A-Za-z_$(\d])|(?<![\w$.])([A-Za-z_$][\w$.]*)\s*[+\-*/%]=(?!=)/g;
+var NOT_OPERANDS = /* @__PURE__ */ new Set(["return", "case", "typeof", "await", "yield", "in", "of", "new", "throw", "else", "do", "void", "delete"]);
+var GETTER = /^\s*(?:(?:public|private|protected|static|override|readonly)\s+)*get\s+[A-Za-z_$][\w$]*\s*\(/;
+var MAPPER_NAME = /^(?:map|to|from)[A-Z_]|^(?:Map|To|From)[A-Z]|Mapper$|Mapping$/;
+var DTO_PATH = /(^|\/)(dtos?|DTOs?|contracts\/(requests|responses))\/|(Dto|DTO|ViewModel)\.cs$|\.dto\.[a-z]+$/;
+var MIGRATION_PATH = /(^|\/)migrations?\/|ModelSnapshot\.cs$|(^|\/)migrations?[^/]*\.(cs|php|ts|js)$/i;
+var DI_REGISTRATION = /\.(?:AddScoped|AddTransient|AddSingleton|AddDbContext\w*|AddHttpClient|TryAdd\w+)\s*[<(]/;
+var BEHAVIOUR_KINDS = /* @__PURE__ */ new Set(["function", "method"]);
+function bodyStart(code) {
+  const open = code.indexOf("(");
+  if (open === -1) {
+    const arrow = code.indexOf("=>");
+    return arrow === -1 ? 0 : arrow + 2;
+  }
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < code.length; i += 1) {
+    if (code[i] === "(") depth += 1;
+    else if (code[i] === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        close = i;
+        break;
+      }
+    }
+  }
+  if (close === -1) return 0;
+  for (let i = close + 1; i < code.length; i += 1) {
+    if (code[i] === "{") return i;
+    if (code[i] === "=" && code[i + 1] === ">") return i + 2;
+  }
+  return close + 1;
+}
+function paramCount(signature, code) {
+  const fromSignature = normalizeSignature(signature ?? "").arity;
+  if (fromSignature !== null) return fromSignature;
+  const declared = normalizeSignature(code.slice(0, bodyStart(code))).arity;
+  return declared ?? 0;
+}
+function maxNesting(code) {
+  let pending = null;
+  let parens = 0;
+  let deepest = 0;
+  const stack = [];
+  let controlDepth = 0;
+  for (const [token] of code.matchAll(/[A-Za-z_$][\w$]*|=>|[(){};]/g)) {
+    if (token === "(") parens += 1;
+    else if (token === ")") parens = Math.max(0, parens - 1);
+    else if (token === "{") {
+      const isControl = pending !== null && pending === parens;
+      stack.push(isControl);
+      if (isControl) controlDepth += 1;
+      deepest = Math.max(deepest, controlDepth);
+      pending = null;
+    } else if (token === "}") {
+      if (stack.pop()) controlDepth -= 1;
+    } else if (token === ";" || token === "=>" || token === "function") {
+      if (pending === parens) pending = null;
+    } else if (CONTROL.has(token)) {
+      pending = parens;
+    }
+  }
+  return deepest;
+}
+function countMatches(text3, pattern) {
+  let count = 0;
+  for (const _ of text3.matchAll(pattern)) count += 1;
+  return count;
+}
+function hasArithmetic(code) {
+  for (const match of code.matchAll(ARITHMETIC)) {
+    if (NOT_OPERANDS.has(match[1] ?? match[3])) continue;
+    return true;
+  }
+  return false;
+}
+function asSymbol(input) {
+  return typeof input === "string" ? { body: input, signature: "", kind: "function", name: "" } : input ?? {};
+}
+function computeMetrics(input) {
+  const symbol19 = asSymbol(input);
+  const { code } = stripCode(symbol19.body ?? "");
+  const inner = code.slice(bodyStart(code));
+  const lines = code.split("\n").filter((line) => line.trim() !== "").length;
+  const cyclomatic = 1 + countMatches(inner, BRANCH_KEYWORDS) + countMatches(inner, BRANCH_OPERATORS) + countMatches(inner, TERNARY);
+  return {
+    lines,
+    params: paramCount(symbol19.signature, code),
+    nesting: maxNesting(inner),
+    cyclomatic
+  };
+}
+function logicProfile(input) {
+  const symbol19 = asSymbol(input);
+  const metrics = computeMetrics(symbol19);
+  const name17 = String(symbol19.name ?? "");
+  const body = String(symbol19.body ?? "");
+  const verdict = (exempt) => ({ logicBearing: false, reasons: [], exempt, metrics });
+  if (symbol19.kind && !BEHAVIOUR_KINDS.has(symbol19.kind)) return verdict(`kind:${symbol19.kind}`);
+  if (MIGRATION_PATH.test(String(symbol19.path ?? ""))) return verdict("migration");
+  if (DTO_PATH.test(String(symbol19.path ?? ""))) return verdict("dto");
+  const { code, regexLiterals } = stripCode(body);
+  const inner = code.slice(bodyStart(code));
+  if (DI_REGISTRATION.test(inner) && metrics.cyclomatic <= 2) return verdict("di-registration");
+  const loop = LOOP.test(inner);
+  const flat = metrics.cyclomatic === 1 && !loop;
+  if (flat && GETTER.test(symbol19.signature || body.split("\n")[0] || "")) return verdict("getter");
+  if (flat && MAPPER_NAME.test(name17)) return verdict("mapper");
+  const reasons = [];
+  if (metrics.cyclomatic >= 2) reasons.push("branches");
+  if (loop) reasons.push("loop");
+  if (hasArithmetic(inner)) reasons.push("arithmetic");
+  if (DATE_OPS.test(inner)) reasons.push("date");
+  if (regexLiterals > 0 || REGEX_OPS.test(inner)) reasons.push("regex");
+  if (MATH_OPS.test(inner)) reasons.push("math");
+  if (CURRENCY_OPS.test(inner)) reasons.push("currency");
+  if (PARSE_OPS.test(inner)) reasons.push("parse");
+  return { logicBearing: reasons.length > 0, reasons, exempt: null, metrics };
+}
+function isLogicBearing(input) {
+  return logicProfile(input).logicBearing;
+}
+
+// src/context/coverage.mjs
+var TEST_FILE = /(\.|_)(test|spec)\.[a-z]+$|Tests?\.(cs|php|java|kt)$|(^|\/)(tests?|__tests__|spec)\//i;
+var MAX_TEST_FILE_CHARS = 2e5;
+var MAX_SOURCE_FILE_CHARS = 4e5;
+var SCRIPT_MODULE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|vue)$/i;
+var AUTO_IMPORT_SCOPE = /(^|\/)(composables|utils)\//;
+var ROOT_ALIASES = /^(?:@\/|~~\/|~\/|@@\/|#\/|~)/;
+function git3(repo, args) {
+  return execFileSync3("git", ["-C", repo, ...args], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+}
+function findTestFiles(repo = ".") {
+  let listing;
+  try {
+    listing = git3(repo, ["ls-files", "--cached", "--others", "--exclude-standard"]);
+  } catch {
+    return [];
+  }
+  return listing.split("\n").map((line) => line.trim()).filter(Boolean).filter((path) => TEST_FILE.test(path));
+}
+function readTestCorpus(repo, files) {
+  const corpus = [];
+  let refused = 0;
+  for (const path of files) {
+    const full = join3(repo, path);
+    if (!isRegularFileWithin(full, repo)) {
+      refused += 1;
+      continue;
+    }
+    try {
+      corpus.push({ path, text: readFileSync3(full, "utf8").slice(0, MAX_TEST_FILE_CHARS), modules: null });
+    } catch {
+    }
+  }
+  return { files: corpus, refused };
+}
+function importSpecifiers(text3) {
+  const out = [];
+  const patterns = [
+    // `[^'"]{0,4000}?` rather than `[^'"]*?`: a file of `import` words with no
+    // quote after them would otherwise rescan to the end from each one.
+    /\bimport\s+(?:[^'"]{0,4000}?\s+from\s+)?['"]([^'"\n]+)['"]/g,
+    /\bimport\s*\(\s*['"]([^'"\n]+)['"]\s*\)/g,
+    /\brequire\s*\(\s*['"]([^'"\n]+)['"]\s*\)/g,
+    /\b(?:vi|jest)\s*\.\s*(?:mock|doMock|importActual|requireActual)\s*(?:<[^>]*>)?\s*\(\s*['"]([^'"\n]+)['"]/g,
+    /\bexport\s+(?:\*|\{[^}]{0,4000}\})\s+from\s+['"]([^'"\n]+)['"]/g
+  ];
+  for (const pattern of patterns) for (const match of text3.matchAll(pattern)) out.push(match[1]);
+  return out;
+}
+function stripModuleExtension(path) {
+  return path.replace(/\?.*$/, "").replace(SCRIPT_MODULE, "");
+}
+function resolveSpecifier(specifier, fromPath) {
+  const clean2 = stripModuleExtension(specifier).replace(/\/index$/, "");
+  if (clean2.startsWith(".")) {
+    const resolved = posix.normalize(posix.join(posix.dirname(fromPath), clean2));
+    return { exact: resolved.replace(/^\.\//, ""), tail: null };
+  }
+  const rest = clean2.replace(ROOT_ALIASES, "").replace(/^@[\w.-]+\//, "");
+  return { exact: null, tail: rest || null };
+}
+function importsModule(file2, modulePath) {
+  if (!file2.modules) {
+    file2.modules = importSpecifiers(file2.text).map((specifier) => resolveSpecifier(specifier, file2.path));
+  }
+  const module = stripModuleExtension(modulePath).replace(/\/index$/, "");
+  return file2.modules.some(({ exact, tail }) => {
+    if (exact !== null) return module === exact || module.startsWith(`${exact}/`);
+    if (!tail) return false;
+    return module === tail || module.endsWith(`/${tail}`) || module.includes(`/${tail}/`) || module.startsWith(`${tail}/`);
+  });
+}
+function sourceReader(repo) {
+  const cache = /* @__PURE__ */ new Map();
+  return (path) => {
+    if (cache.has(path)) return cache.get(path);
+    let lines = null;
+    const full = join3(repo, String(path ?? ""));
+    try {
+      if (path && isRegularFileWithin(full, repo)) {
+        lines = readFileSync3(full, "utf8").slice(0, MAX_SOURCE_FILE_CHARS).split("\n");
+      }
+    } catch {
+      lines = null;
+    }
+    cache.set(path, lines);
+    return lines;
+  };
+}
+function enclosingClass(lines, line) {
+  for (let i = Math.min(line, lines.length) - 1; i >= 0; i -= 1) {
+    const match = lines[i].match(/\b(?:class|record|struct)\s+([A-Za-z_]\w*)/);
+    if (match && !/^\s*(\/\/|\*)/.test(lines[i])) return match[1];
+  }
+  return null;
+}
+var MAX_BASE_LIST_LINES = 6;
+function csharpInterfaces(lines, owner) {
+  const out = /* @__PURE__ */ new Set([`I${owner}`]);
+  if (!lines) return [...out];
+  const declaration = new RegExp(`\\b(?:class|record|struct)\\s+${escapeRegExp(owner)}\\b`);
+  const start = lines.findIndex((line) => declaration.test(line) && !/^\s*(\/\/|\*)/.test(line));
+  if (start === -1) return [...out];
+  let text3 = lines.slice(start, start + MAX_BASE_LIST_LINES).join(" ");
+  text3 = text3.slice(text3.search(declaration));
+  const body = text3.indexOf("{");
+  if (body !== -1) text3 = text3.slice(0, body);
+  const colon = text3.indexOf(":");
+  if (colon === -1) return [...out];
+  const baseList = text3.slice(colon + 1).split(/\bwhere\b/)[0];
+  let flat = baseList;
+  while (/<[^<>]*>/.test(flat)) flat = flat.replace(/<[^<>]*>/g, "");
+  for (const part of flat.split(",")) {
+    const name17 = part.trim().split(".").pop()?.trim() ?? "";
+    if (/^I[A-Z]\w*$/.test(name17)) out.add(name17);
+  }
+  return [...out];
+}
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function mentionPattern(name17) {
+  return new RegExp(`\\b${escapeRegExp(name17)}\\b`);
+}
+function csharpMentionPattern(name17) {
+  return new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(name17)}(?![A-Za-z0-9])`);
+}
+function crossWithTests({ symbols = [], repo = ".", logicOnly = true, testFiles: listed = null } = {}) {
+  const testFiles = Array.isArray(listed) ? listed : findTestFiles(repo);
+  if (!testFiles.length) {
+    return {
+      hasTestSuite: false,
+      testFileCount: 0,
+      refusedTestFiles: 0,
+      covered: [],
+      orphans: [],
+      exempt: []
+    };
+  }
+  const { files, refused } = readTestCorpus(repo, testFiles);
+  const corpus = files.map((file2) => file2.text).join("\n");
+  const readSource = sourceReader(repo);
+  const covered = [];
+  const orphans = [];
+  const exempt = [];
+  for (const symbol19 of symbols) {
+    const reason = logicOnly ? exemptReason(symbol19, readSource) : null;
+    if (reason) {
+      exempt.push({ ...symbol19, exemptReason: reason });
+      continue;
+    }
+    (isCovered(symbol19, files, corpus, readSource) ? covered : orphans).push(symbol19);
+  }
+  return {
+    hasTestSuite: true,
+    testFileCount: testFiles.length,
+    refusedTestFiles: refused,
+    covered,
+    orphans,
+    exempt
+  };
+}
+function exemptReason(symbol19, readSource) {
+  if (symbol19.exported === false) return "not-exported";
+  let body = symbol19.body;
+  if (body === void 0 || body === null) {
+    const lines = readSource(symbol19.path);
+    if (!lines || !symbol19.line) return null;
+    body = bodyLines(lines, symbol19.line - 1).join("\n");
+  }
+  if (!String(body).trim()) return null;
+  const profile = logicProfile({ ...symbol19, body });
+  if (profile.logicBearing) return null;
+  return profile.exempt ?? "no-logic";
+}
+function isCovered(symbol19, files, corpus, readSource) {
+  const path = String(symbol19.path ?? "");
+  if (SCRIPT_MODULE.test(path) && !AUTO_IMPORT_SCOPE.test(path)) {
+    const mention = mentionPattern(symbol19.name);
+    return files.some((file2) => mention.test(file2.text) && importsModule(file2, path));
+  }
+  if (/\.cs$/i.test(path) && symbol19.kind !== "class") {
+    const lines = readSource(path);
+    const owner = symbol19.container ?? (lines ? enclosingClass(lines, symbol19.line ?? 0) : null);
+    if (owner && owner !== symbol19.name) {
+      const method = csharpMentionPattern(symbol19.name);
+      const names = [owner, ...csharpInterfaces(lines, owner)];
+      const ownerMention = new RegExp(`\\b(?:${names.map(escapeRegExp).join("|")})\\b`);
+      const ownerTests = new RegExp(`(^|/)${escapeRegExp(owner)}_?Tests?\\.cs$`, "i");
+      return files.some(
+        (file2) => method.test(file2.text) && (ownerTests.test(file2.path) || ownerMention.test(file2.text))
+      );
+    }
+    return csharpMentionPattern(symbol19.name).test(corpus);
+  }
+  return mentionPattern(symbol19.name).test(corpus);
+}
+
+// src/similarity/exclusions.mjs
+var EXCLUDED_PATHS = [
+  /(^|\/)migrations?\//i,
+  /(^|\/)__generated__\//i,
+  /(^|\/)generated\//i,
+  /(^|\/)node_modules\//,
+  /(^|\/)vendor\//,
+  /(^|\/)(dist|build|out|bin|obj)\//i,
+  /(^|\/)wwwroot\//i,
+  /\.generated\.[a-z]+$/i,
+  /\.g\.[a-z]+$/i,
+  /\.designer\.[a-z]+$/i,
+  /\.min\.[a-z]+$/i,
+  /\.d\.ts$/i,
+  /(^|\/)migrations?[^/]*\.(cs|php|ts|js)$/i,
+  // Tests, for the same reason as migrations: repetition there is the pattern,
+  // not a defect. Arrange/act/assert makes any two test methods look alike, and
+  // a real run bore that out — eight candidate pairs surfaced on a single pull
+  // request and the model judged all eight unrelated, one model call each. The
+  // check exists to find reimplemented production logic; two tests that set up
+  // the same fixture are doing their job.
+  /(^|\/)(tests?|__tests__|spec)\//i,
+  /\.(test|spec)\.[a-z]+$/i,
+  // `[^/]+`, no `[^/]*`: la convencion es `OrderServiceTests.cs` / `OrderTest.php`.
+  // Con `*`, un controlador de produccion llamado `Test.php` quedaba excluido.
+  /(^|\/)[^/]+Tests?\.(cs|php)$/,
+  // Stories, mocks and fixtures restate production shapes on purpose: a story
+  // renders a component with sample props, a mock mirrors the service it stands
+  // in for, a fixture is data. None of it is reimplemented logic.
+  /\.stories\.[a-z]+$/i,
+  /(^|\/)(__stories__|stories)\//i,
+  /(^|\/)(__mocks__|mocks?)\//i,
+  /\.mocks?\.[a-z]+$/i,
+  /(^|\/)(__fixtures__|fixtures?)\//i,
+  // Translation files: the same key in every language is the point.
+  /(^|\/)locales?\//i,
+  // The EF Core model snapshot is generated, and some layouts keep it outside
+  // the migrations folder.
+  /ModelSnapshot\.cs$/i,
+  // Tooling folders. Agent skills keep reference templates there
+  // (`.claude/skills/*/references/*.ts`), and every module generated from one
+  // matches its template at 1.00: offering the template as "the existing symbol
+  // to reuse" sends the developer to code that never runs.
+  /(^|\/)\.(claude|agents|github|cursor)\//
+];
+var EXCLUDED_NAMES = [
+  /(Dto|DTO)s?$/,
+  /(Request|Response|Payload|ViewModel|Model)$/,
+  /Mapper$/i,
+  /Profile$/,
+  // AutoMapper profiles
+  /Migration$/i,
+  /(Entity|Enum|Constants?|Options|Settings|Config(uration)?)$/
+];
+var COMPARABLE_KINDS = /* @__PURE__ */ new Set(["method", "function"]);
+function isExcludedPath(path) {
+  const value = String(path || "");
+  return EXCLUDED_PATHS.some((pattern) => pattern.test(value));
+}
+function isExcludedSymbol(symbol19) {
+  if (!symbol19) return true;
+  if (isExcludedPath(symbol19.path)) return true;
+  if (!COMPARABLE_KINDS.has(symbol19.kind)) return true;
+  return EXCLUDED_NAMES.some((pattern) => pattern.test(String(symbol19.name || "")));
+}
+function applyExclusions(symbols = []) {
+  return symbols.filter((symbol19) => !isExcludedSymbol(symbol19));
+}
+function parseSide(raw) {
+  const text3 = String(raw ?? "").trim();
+  if (!text3) return null;
+  const hash2 = text3.lastIndexOf("#");
+  if (hash2 !== -1) {
+    const path = text3.slice(0, hash2).trim();
+    const name17 = text3.slice(hash2 + 1).trim();
+    return { path: path ? globToRegExp(path) : null, name: name17 && name17 !== "*" ? name17 : null };
+  }
+  if (/^[A-Za-z_$][\w$]*$/.test(text3)) return { path: null, name: text3 };
+  return { path: globToRegExp(text3), name: null };
+}
+function parseEntry(entry) {
+  let sides = null;
+  if (Array.isArray(entry)) sides = entry;
+  else if (typeof entry === "string") sides = entry.split(/\s*(?:<->|\|)\s*/);
+  else if (entry && typeof entry === "object") {
+    sides = Array.isArray(entry.pair) ? entry.pair : [entry.a, entry.b];
+  }
+  if (!sides || sides.length !== 2) return null;
+  const [left, right] = sides.map(parseSide);
+  return left && right ? [left, right] : null;
+}
+function sideMatches(side, symbol19) {
+  if (!symbol19) return false;
+  if (side.name !== null && side.name !== symbol19.name) return false;
+  if (side.path !== null && !side.path.test(String(symbol19.path ?? ""))) return false;
+  return true;
+}
+function compileAllowPairs(entries = []) {
+  const pairs = (Array.isArray(entries) ? entries : []).map(parseEntry).filter(Boolean);
+  if (!pairs.length) return () => false;
+  return (a, b) => pairs.some(
+    ([left, right]) => sideMatches(left, a) && sideMatches(right, b) || sideMatches(left, b) && sideMatches(right, a)
+  );
+}
+function globToRegExp(glob) {
+  const source = String(glob).replace(/\\/g, "/").replace(/^\.\//, "");
+  let out = "";
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === "*") {
+      if (source[i + 1] === "*") {
+        if (source[i + 2] === "/") {
+          out += "(?:.*/)?";
+          i += 2;
+        } else {
+          out += ".*";
+          i += 1;
+        }
+      } else {
+        out += "[^/]*";
+      }
+    } else if (char === "?") {
+      out += "[^/]";
+    } else {
+      out += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${out}$`);
+}
+
+// src/similarity/name.mjs
+var STOP_WORDS = [
+  // English
+  "get",
+  "set",
+  "the",
+  "a",
+  "an",
+  "of",
+  "for",
+  "to",
+  "by",
+  "with",
+  "from",
+  "and",
+  "or",
+  "is",
+  "do",
+  "my",
+  "new",
+  "obj",
+  "data",
+  "value",
+  "item",
+  "result",
+  // Spanish articles, prepositions and connectors
+  "de",
+  "del",
+  "la",
+  "el",
+  "los",
+  "las",
+  "lo",
+  "para",
+  "por",
+  "con",
+  "en",
+  "al",
+  "y",
+  "o",
+  "un",
+  "una",
+  "mi",
+  "desde",
+  "hasta",
+  "segun",
+  // Spanish words that carry as little as their English stop-word twins
+  "obtener",
+  "obtiene",
+  "obten",
+  "establecer",
+  "establece",
+  "es",
+  "esta",
+  "nuevo",
+  "nueva",
+  "dato",
+  "valor",
+  "resultado",
+  "elemento",
+  "objeto"
+];
+var SYNONYMS = {
+  // English: verbs people pick for the same act
+  calculate: "compute",
+  calc: "compute",
+  fetch: "load",
+  retrieve: "load",
+  read: "load",
+  build: "create",
+  make: "create",
+  generate: "create",
+  remove: "delete",
+  destroy: "delete",
+  check: "validate",
+  verify: "validate",
+  ensure: "validate",
+  convert: "map",
+  transform: "map",
+  parse: "map",
+  find: "search",
+  lookup: "search",
+  send: "dispatch",
+  total: "sum",
+  amount: "sum",
+  // Spanish verbs, in the forms that reach identifiers: the infinitive and the
+  // third person used in imperative-style names such as `calculaTotal`.
+  formatear: "format",
+  formatea: "format",
+  formato: "format",
+  calcular: "compute",
+  calcula: "compute",
+  calculo: "compute",
+  computar: "compute",
+  traer: "load",
+  trae: "load",
+  cargar: "load",
+  carga: "load",
+  leer: "load",
+  lee: "load",
+  recuperar: "load",
+  consultar: "load",
+  consulta: "load",
+  validar: "validate",
+  valida: "validate",
+  verificar: "validate",
+  verifica: "validate",
+  comprobar: "validate",
+  comprueba: "validate",
+  chequear: "validate",
+  asegurar: "validate",
+  crear: "create",
+  crea: "create",
+  generar: "create",
+  genera: "create",
+  construir: "create",
+  construye: "create",
+  armar: "create",
+  arma: "create",
+  eliminar: "delete",
+  elimina: "delete",
+  borrar: "delete",
+  borra: "delete",
+  quitar: "delete",
+  quita: "delete",
+  remover: "delete",
+  suprimir: "delete",
+  buscar: "search",
+  busca: "search",
+  encontrar: "search",
+  encuentra: "search",
+  hallar: "search",
+  enviar: "dispatch",
+  envia: "dispatch",
+  mandar: "dispatch",
+  manda: "dispatch",
+  convertir: "map",
+  convierte: "map",
+  transformar: "map",
+  transforma: "map",
+  parsear: "map",
+  parsea: "map",
+  mapear: "map",
+  mapea: "map",
+  guardar: "save",
+  guarda: "save",
+  almacenar: "save",
+  salvar: "save",
+  actualizar: "update",
+  actualiza: "update",
+  modificar: "update",
+  modifica: "update",
+  editar: "update",
+  edita: "update",
+  agregar: "add",
+  agrega: "add",
+  anadir: "add",
+  adicionar: "add",
+  insertar: "add",
+  mostrar: "show",
+  muestra: "show",
+  renderizar: "show",
+  desplegar: "show",
+  ocultar: "hide",
+  oculta: "hide",
+  esconder: "hide",
+  abrir: "open",
+  abre: "open",
+  cerrar: "close",
+  cierra: "close",
+  iniciar: "start",
+  inicia: "start",
+  comenzar: "start",
+  empezar: "start",
+  arrancar: "start",
+  terminar: "stop",
+  finalizar: "stop",
+  detener: "stop",
+  limpiar: "clear",
+  limpia: "clear",
+  reiniciar: "reset",
+  resetear: "reset",
+  ordenar: "sort",
+  ordena: "sort",
+  filtrar: "filter",
+  filtra: "filter",
+  agrupar: "group",
+  agrupa: "group",
+  contar: "count",
+  sumar: "sum",
+  suma: "sum",
+  restar: "subtract",
+  resta: "subtract",
+  multiplicar: "multiply",
+  dividir: "divide",
+  redondear: "round",
+  redondea: "round",
+  promediar: "average",
+  comparar: "compare",
+  compara: "compare",
+  copiar: "copy",
+  clonar: "clone",
+  mover: "move",
+  descargar: "download",
+  subir: "upload",
+  exportar: "export",
+  importar: "import",
+  imprimir: "print",
+  registrar: "register",
+  autenticar: "authenticate",
+  autorizar: "authorize",
+  asignar: "assign",
+  asigna: "assign",
+  aplicar: "apply",
+  aplica: "apply",
+  procesar: "process",
+  procesa: "process",
+  ejecutar: "execute",
+  ejecuta: "execute",
+  manejar: "handle",
+  maneja: "handle",
+  notificar: "notify",
+  normalizar: "normalize",
+  normaliza: "normalize",
+  sanitizar: "sanitize",
+  escapar: "escape",
+  codificar: "encode",
+  decodificar: "decode",
+  cifrar: "encrypt",
+  encriptar: "encrypt",
+  descifrar: "decrypt",
+  desencriptar: "decrypt",
+  serializar: "serialize",
+  deserializar: "deserialize",
+  redirigir: "redirect",
+  navegar: "navigate",
+  seleccionar: "select",
+  selecciona: "select",
+  cambiar: "change",
+  cambia: "change",
+  tiene: "has",
+  puede: "can",
+  listar: "list",
+  lista: "list",
+  listado: "list",
+  // Spanish nouns and adjectives
+  fecha: "date",
+  hora: "hour",
+  tiempo: "time",
+  dia: "day",
+  mes: "month",
+  ano: "year",
+  anio: "year",
+  semana: "week",
+  edad: "age",
+  nacimiento: "birth",
+  inicio: "start",
+  fin: "end",
+  rango: "range",
+  intervalo: "interval",
+  moneda: "currency",
+  monto: "sum",
+  importe: "sum",
+  cantidad: "quantity",
+  precio: "price",
+  costo: "cost",
+  coste: "cost",
+  impuesto: "tax",
+  descuento: "discount",
+  saldo: "balance",
+  pago: "payment",
+  factura: "invoice",
+  pedido: "order",
+  orden: "order",
+  porcentaje: "percent",
+  tasa: "rate",
+  dinero: "money",
+  tarjeta: "card",
+  transaccion: "transaction",
+  cliente: "customer",
+  usuario: "user",
+  rol: "role",
+  permiso: "permission",
+  sesion: "session",
+  contrasena: "password",
+  clave: "key",
+  cuenta: "account",
+  empresa: "company",
+  agente: "agent",
+  nombre: "name",
+  apellido: "surname",
+  correo: "email",
+  telefono: "phone",
+  direccion: "address",
+  ciudad: "city",
+  pais: "country",
+  zona: "zone",
+  barrio: "neighborhood",
+  estado: "status",
+  tipo: "type",
+  categoria: "category",
+  producto: "product",
+  propiedad: "property",
+  inmueble: "property",
+  archivo: "file",
+  imagen: "image",
+  documento: "document",
+  mensaje: "message",
+  texto: "text",
+  cadena: "string",
+  numero: "number",
+  entero: "integer",
+  tabla: "table",
+  fila: "row",
+  columna: "column",
+  campo: "field",
+  formulario: "form",
+  boton: "button",
+  pagina: "page",
+  ruta: "route",
+  enlace: "link",
+  codigo: "code",
+  identificador: "id",
+  registro: "record",
+  historial: "history",
+  reporte: "report",
+  informe: "report",
+  resumen: "summary",
+  detalle: "detail",
+  configuracion: "config",
+  ajuste: "setting",
+  opcion: "option",
+  filtro: "filter",
+  respuesta: "response",
+  solicitud: "request",
+  peticion: "request",
+  servicio: "service",
+  evento: "event",
+  tarea: "task",
+  proyecto: "project",
+  contrato: "contract",
+  venta: "sale",
+  compra: "purchase",
+  carrito: "cart",
+  alquiler: "rent",
+  arriendo: "rent",
+  activo: "active",
+  activa: "active",
+  vacio: "empty",
+  vacia: "empty",
+  valido: "valid",
+  requerido: "required",
+  obligatorio: "required",
+  disponible: "available",
+  habilitado: "enabled",
+  deshabilitado: "disabled",
+  actual: "current",
+  siguiente: "next",
+  anterior: "previous",
+  primero: "first",
+  ultimo: "last",
+  maximo: "max",
+  minimo: "min",
+  barra: "slash",
+  guion: "dash",
+  punto: "dot",
+  coma: "comma",
+  espacio: "space"
+};
+var CANONICAL = new Map([...Object.entries(SYNONYMS), ...STOP_WORDS.map((word) => [word, ""])]);
+var LEXICON_SIZE = CANONICAL.size;
+var SPANISH_ES_ENDINGS = ["dad", "tad", "or", "al", "el", "il", "ol", "ar", "er", "on", "us"];
+var MAX_NAME_CHARS2 = 200;
+function tokenize(name17) {
+  return String(name17 || "").slice(0, MAX_NAME_CHARS2).normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z])([A-Z][a-z])/g, "$1 $2").split(/[^A-Za-z0-9]+/).map((token) => token.toLowerCase()).filter(Boolean).map((token) => canonical(token)).filter(Boolean);
+}
+function canonical(token) {
+  for (const form of singularForms(token)) {
+    const mapped = CANONICAL.get(form);
+    if (mapped !== void 0) return mapped === "" ? "" : stem(mapped);
+  }
+  return stem(token);
+}
+function singularForms(token) {
+  const forms = [token];
+  if (token.length > 3 && token.endsWith("ies")) forms.push(`${token.slice(0, -3)}y`);
+  if (token.length > 3 && token.endsWith("s") && !token.endsWith("ss")) forms.push(token.slice(0, -1));
+  if (token.length > 4 && token.endsWith("es")) forms.push(token.slice(0, -2));
+  return forms;
+}
+function stem(token) {
+  if (token.length <= 3) return token;
+  for (const ending of SPANISH_ES_ENDINGS) {
+    const min = ending.length + 1;
+    if (token.endsWith(`${ending}es`) && token.length - 2 >= min) return token.slice(0, -2);
+    if (token.endsWith(`${ending}e`) && token.length - 1 >= min) return token.slice(0, -1);
+  }
+  if (token.endsWith("ies")) return `${token.slice(0, -3)}y`;
+  if (token.endsWith("sses")) return token.slice(0, -2);
+  if (token.endsWith("us")) return token;
+  if (token.endsWith("s") && !token.endsWith("ss")) return token.slice(0, -1);
+  return token;
+}
+function nameSimilarity(a, b) {
+  const left = new Set(tokenize(a));
+  const right = new Set(tokenize(b));
+  if (!left.size || !right.size) return 0;
+  let shared = 0;
+  for (const token of left) if (right.has(token)) shared += 1;
+  return shared / Math.min(left.size, right.size);
+}
+
+// src/similarity/score.mjs
+var DEFAULT_WEIGHTS = { name: 0.25, signature: 0.15, body: 0.45, vocabulary: 0.15 };
+var DEFAULT_THRESHOLD = 0.55;
+var STRONG_BODY = 0.8;
+var VOCABULARY_AGREEMENT = 0.3;
+var MAX_CANDIDATES = 5;
+var MIN_TOKENS_EXPORTED = 8;
+var MIN_TOKENS_PRIVATE = 16;
+function isPublicSurface(symbol19) {
+  return Boolean(symbol19?.exported) || symbol19?.scope === "public" || symbol19?.scope === "exported";
+}
+function headEnd(tokens) {
+  const open = tokens.indexOf("(");
+  if (open === -1) return 0;
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < tokens.length; i += 1) {
+    if (tokens[i] === "(") depth += 1;
+    else if (tokens[i] === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        close = i;
+        break;
+      }
+    }
+  }
+  if (close === -1) return 0;
+  depth = 0;
+  for (let i = close + 1; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (depth === 0 && token === "{") return i + 1;
+    if (depth === 0 && token === "=" && tokens[i + 1] === ">") return i + 2;
+    if (token === "(" || token === "[") depth += 1;
+    else if (token === ")" || token === "]") depth = Math.max(0, depth - 1);
+  }
+  return 0;
+}
+function bodyTail(tokens) {
+  return tokens.slice(headEnd(tokens));
+}
+var skeletonCache = /* @__PURE__ */ new WeakMap();
+function skeletonFor(symbol19) {
+  const cached2 = skeletonCache.get(symbol19);
+  if (cached2) return cached2;
+  const tokens = normalizeBody(symbol19?.body ?? "");
+  const computed = { tokens, tail: bodyTail(tokens) };
+  skeletonCache.set(symbol19, computed);
+  return computed;
+}
+function hasEnoughBody(symbol19) {
+  const { tokens, tail } = skeletonFor(symbol19);
+  return isPublicSurface(symbol19) ? tokens.length >= MIN_TOKENS_EXPORTED : tail.length >= MIN_TOKENS_PRIVATE;
+}
+var shingleCache = /* @__PURE__ */ new WeakMap();
+function shinglesFor(symbol19) {
+  const cached2 = shingleCache.get(symbol19);
+  if (cached2) return cached2;
+  const computed = hasEnoughBody(symbol19) ? shingles(skeletonFor(symbol19).tokens) : /* @__PURE__ */ new Set();
+  shingleCache.set(symbol19, computed);
+  return computed;
+}
+var tokenCache = /* @__PURE__ */ new WeakMap();
+var signatureCache = /* @__PURE__ */ new WeakMap();
+var vocabularyCache = /* @__PURE__ */ new WeakMap();
+var weightCache = /* @__PURE__ */ new WeakMap();
+function tokensFor(symbol19) {
+  const cached2 = tokenCache.get(symbol19);
+  if (cached2) return cached2;
+  const computed = new Set(tokenize(symbol19.name ?? ""));
+  tokenCache.set(symbol19, computed);
+  return computed;
+}
+function signatureFor(symbol19) {
+  const cached2 = signatureCache.get(symbol19);
+  if (cached2) return cached2;
+  const computed = normalizeSignature(symbol19.signature ?? "");
+  signatureCache.set(symbol19, computed);
+  return computed;
+}
+function vocabularyFor(symbol19) {
+  const cached2 = vocabularyCache.get(symbol19);
+  if (cached2) return cached2;
+  const computed = vocabulary(symbol19.body ?? "", { exclude: [symbol19.name] });
+  vocabularyCache.set(symbol19, computed);
+  return computed;
+}
+function weightFor(symbol19, table) {
+  const cached2 = weightCache.get(symbol19);
+  if (cached2 && cached2.table === table) return cached2.total;
+  const total = totalWeight(shinglesFor(symbol19), table);
+  weightCache.set(symbol19, { table, total });
+  return total;
+}
+var DF_SAMPLE = 2e4;
+var CLOCK_EVERY = 256;
+function documentFrequencyFor(index = [], { deadline = null, sample = DF_SAMPLE } = {}) {
+  const stride = index.length > sample ? index.length / sample : 1;
+  const picked = [];
+  for (let k = 0; k < index.length && picked.length < sample; k += 1) {
+    const at = Math.floor(k * stride);
+    if (at >= index.length) break;
+    picked.push(index[at]);
+  }
+  if (deadline === null) return buildDocumentFrequency(picked, shinglesFor);
+  let read = 0;
+  let stopped = false;
+  const bounded2 = (symbol19) => {
+    if (stopped) return null;
+    read += 1;
+    if (read % CLOCK_EVERY === 0 && Date.now() >= deadline) {
+      stopped = true;
+      return null;
+    }
+    return shinglesFor(symbol19);
+  };
+  return buildDocumentFrequency(picked, bounded2);
+}
+function cannotClear(a, b, threshold, weights, table) {
+  if (tokensShare(tokensFor(a), tokensFor(b))) return false;
+  const left = signatureFor(a);
+  const right = signatureFor(b);
+  const arityCouldMatch = left.arity !== null && right.arity !== null && left.arity === right.arity;
+  if (arityCouldMatch) return false;
+  const weightA = weightFor(a, table);
+  const weightB = weightFor(b, table);
+  const ceiling = weightA > 0 && weightB > 0 ? Math.min(weightA, weightB) / Math.max(weightA, weightB) : 0;
+  if (ceiling >= STRONG_BODY) return false;
+  const best = (weights.body ?? 0) * ceiling + (weights.vocabulary ?? 0);
+  return best < threshold;
+}
+function tokensShare(left, right) {
+  for (const token of left) if (right.has(token)) return true;
+  return false;
+}
+function scorePair(a, b, weights = DEFAULT_WEIGHTS, { table = null } = {}) {
+  const name17 = nameSimilarity(a.name, b.name);
+  const signature = signatureSimilarity(a.signature, b.signature);
+  const body = a.body && b.body ? weightedJaccard(shinglesFor(a), shinglesFor(b), table) : 0;
+  const leftVocabulary = vocabularyFor(a);
+  const rightVocabulary = vocabularyFor(b);
+  const vocab = vocabularySimilarity(leftVocabulary, rightVocabulary);
+  const weighted = (weights.name ?? 0) * name17 + (weights.signature ?? 0) * signature + (weights.body ?? 0) * body + (weights.vocabulary ?? 0) * vocab;
+  const vocabularyAgrees = vocab >= VOCABULARY_AGREEMENT || leftVocabulary.size === 0 && rightVocabulary.size === 0;
+  const score = body >= STRONG_BODY && vocabularyAgrees ? Math.max(weighted, body) : weighted;
+  return { score, name: name17, signature, body, vocabulary: vocab };
+}
+function isSameSymbol(a, b) {
+  if (a.path !== b.path) return false;
+  if (a.line === b.line) return true;
+  const topLevel = (symbol19) => !symbol19.container && (symbol19.scope === void 0 || symbol19.scope === "exported" || symbol19.scope === "module");
+  return a.name === b.name && a.kind === b.kind && topLevel(a) && topLevel(b);
+}
+function encloses(a, b) {
+  if (a.path !== b.path) return false;
+  const spanOf = (symbol19) => {
+    const start = Number(symbol19.line);
+    const end = Array.isArray(symbol19.span) ? Number(symbol19.span[1]) : start;
+    return [start, Number.isFinite(end) ? Math.max(start, end) : start];
+  };
+  const [aStart, aEnd] = spanOf(a);
+  const [bStart, bEnd] = spanOf(b);
+  return aStart <= bStart && bEnd <= aEnd || bStart <= aStart && aEnd <= bEnd;
+}
+function findDuplicates({
+  symbols = [],
+  index = [],
+  threshold = DEFAULT_THRESHOLD,
+  maxCandidates = MAX_CANDIDATES,
+  weights = DEFAULT_WEIGHTS,
+  deadline = null,
+  idf = true,
+  allow = null
+} = {}) {
+  const table = idf ? documentFrequencyFor(index, { deadline }) : null;
+  const allowed = typeof allow === "function" ? allow : compileAllowPairs(allow ?? []);
+  const out = [];
+  let timedOut = false;
+  for (const symbol19 of symbols) {
+    if (timedOut || deadline !== null && Date.now() >= deadline) break;
+    const matches = [];
+    let visited = 0;
+    for (const candidate of index) {
+      visited += 1;
+      if (deadline !== null && visited % CLOCK_EVERY === 0 && Date.now() >= deadline) {
+        timedOut = true;
+        break;
+      }
+      if (isSameSymbol(symbol19, candidate)) continue;
+      if (encloses(symbol19, candidate)) continue;
+      if (cannotClear(symbol19, candidate, threshold, weights, table)) continue;
+      const signals = scorePair(symbol19, candidate, weights, { table });
+      if (signals.score < threshold) continue;
+      if (allowed(symbol19, candidate)) continue;
+      matches.push({ candidate, score: signals.score, signals });
+    }
+    if (!matches.length) continue;
+    matches.sort((a, b) => b.score - a.score);
+    out.push({ symbol: symbol19, matches: matches.slice(0, maxCandidates) });
+  }
+  out.sort((a, b) => b.matches[0].score - a.matches[0].score);
+  return out;
+}
+var HOMONYM_MAX_BODY = 0.5;
+var MAX_HOMONYMS = 15;
+var CONVENTIONAL_NAMES = /* @__PURE__ */ new Set([
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "HEAD",
+  "OPTIONS",
+  "default",
+  "handler",
+  "middleware",
+  "loader",
+  "action",
+  "meta",
+  "setup",
+  "main",
+  "Main",
+  "config",
+  "register",
+  "configure",
+  "Configure",
+  "ConfigureServices",
+  "generateMetadata",
+  "generateStaticParams",
+  "getServerSideProps",
+  "getStaticProps",
+  "getStaticPaths",
+  "OnModelCreating",
+  "Up",
+  "Down",
+  "BuildTargetModel"
+]);
+function homonymKind(symbol19) {
+  if (symbol19.kind === "function") return true;
+  return symbol19.kind === "method" && /\bstatic\b/.test(String(symbol19.signature ?? ""));
+}
+function isReExport(symbol19) {
+  const first = String(symbol19.body ?? symbol19.signature ?? "").split("\n")[0];
+  return /^\s*export\s*(\{|\*)/.test(first);
+}
+function sameText(a, b) {
+  const squash = (body) => stripCode(body ?? "").code.replace(/\s+/g, "");
+  return squash(a.body) === squash(b.body);
+}
+var keyOf = (symbol19) => `${symbol19.path}\0${symbol19.name}`;
+function findHomonyms(index = [], { symbols = null, maxBodySimilarity = HOMONYM_MAX_BODY, max = MAX_HOMONYMS, ignoreNames = [] } = {}) {
+  const ignored = new Set(ignoreNames);
+  const focus = symbols ? new Set(symbols.map(keyOf)) : null;
+  const eligible = (symbol19) => symbol19 && symbol19.name && !isExcludedPath(symbol19.path) && homonymKind(symbol19) && !symbol19.container && !CONVENTIONAL_NAMES.has(symbol19.name) && !ignored.has(symbol19.name) && symbol19.exported !== false && !isReExport(symbol19);
+  const groups = /* @__PURE__ */ new Map();
+  for (const symbol19 of index) {
+    if (!eligible(symbol19)) continue;
+    const list = groups.get(symbol19.name) ?? [];
+    list.push(symbol19);
+    groups.set(symbol19.name, list);
+  }
+  const out = [];
+  const names = [...groups.keys()].sort();
+  for (const name17 of names) {
+    const list = groups.get(name17).slice().sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : (a.line ?? 0) - (b.line ?? 0));
+    if (new Set(list.map((s) => s.path)).size < 2) continue;
+    for (let i = 0; i < list.length; i += 1) {
+      for (let j = i + 1; j < list.length; j += 1) {
+        let symbol19 = list[i];
+        let candidate = list[j];
+        if (symbol19.path === candidate.path) continue;
+        if (focus && !focus.has(keyOf(symbol19)) && !focus.has(keyOf(candidate))) continue;
+        if (sameText(symbol19, candidate)) continue;
+        const body = bodySimilarity(symbol19.body, candidate.body);
+        if (body >= maxBodySimilarity) continue;
+        if (focus && !focus.has(keyOf(symbol19))) [symbol19, candidate] = [candidate, symbol19];
+        out.push({ kind: "homonym", name: name17, symbol: symbol19, candidate, body });
+        if (out.length >= max) return out;
+      }
+    }
+  }
+  return out;
+}
+
+// src/context/duplication.mjs
+var BUDGET_MS = 2e4;
+var MAX_CANDIDATES_PRIVATE = 3;
+var MAX_PAIRS = 15;
+var CONTROL_TOKENS = /* @__PURE__ */ new Set(["if", "else", "for", "foreach", "while", "do", "switch", "case", "try", "catch"]);
+var OPERAND_END = /* @__PURE__ */ new Set([")", "]", "}", "X", '"S"', "0", "this", "self", "null", "true", "false"]);
+var INFIX_KEYWORDS = /* @__PURE__ */ new Set(["as", "is", "in", "of", "instanceof"]);
+function isDelegation(symbol19) {
+  const body = String(symbol19?.body ?? "").replace(/\bvoid\s+(?=[\w$(])/g, "");
+  let tokens = bodyTail(normalizeBody(body));
+  if (tokens[0] === "{") tokens = tokens.slice(1);
+  let depth = 0;
+  let statements = 0;
+  let previous = null;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (CONTROL_TOKENS.has(token)) return false;
+    if (token === "=" && tokens[i + 1] === ">") return false;
+    if (token === "(" || token === "[" || token === "{") depth += 1;
+    else if (token === ")" || token === "]" || token === "}") {
+      depth -= 1;
+      if (depth < 0) break;
+    }
+    if (depth === 0) {
+      const starts = previous === null || previous === ";";
+      const juxtaposed = previous !== null && OPERAND_END.has(previous) && (token === "X" || /^[a-z]+$/.test(token) && !INFIX_KEYWORDS.has(token));
+      if (token !== ";" && (starts || juxtaposed)) statements += 1;
+      if (statements > 1) return false;
+    }
+    previous = token;
+  }
+  return statements <= 1 && !isLogicBearing(symbol19);
+}
+function filterWithin(list, keep, deadline) {
+  const out = [];
+  for (let i = 0; i < list.length; i += 1) {
+    if (i % 256 === 0 && Date.now() >= deadline) break;
+    if (keep(list[i])) out.push(list[i]);
+  }
+  return out;
+}
+function isComparable(symbol19) {
+  return hasEnoughBody(symbol19) && !isDelegation(symbol19);
+}
+function touchedSymbols(diffText, index) {
+  const changes = changedLinesByFile(diffText);
+  if (!changes.size) return [];
+  const out = [];
+  for (const symbol19 of index) {
+    const change = spanChange(symbol19, changes.get(symbol19.path));
+    if (change) out.push({ ...symbol19, change });
+  }
+  return out;
+}
+function symbolKey(symbol19) {
+  return `${symbol19.path}:${symbol19.line}:${symbol19.name}`;
+}
+function pairKey(a, b) {
+  const left = symbolKey(a);
+  const right = symbolKey(b);
+  return left < right ? `${left}|${right}` : `${right}|${left}`;
+}
+function partitionIgnored(symbols, changes) {
+  const kept = [];
+  const suppressed = [];
+  const headIgnores = [];
+  const invalidSuppressions = [];
+  for (const symbol19 of symbols) {
+    const where = { path: symbol19.path, line: symbol19.line, name: symbol19.name };
+    if (symbol19.ignore?.reason) {
+      const ignoreLine = Number(symbol19.ignore.line ?? symbol19.line);
+      const addedHere = Boolean(changes.get(symbol19.path)?.added.has(ignoreLine));
+      if (!addedHere) {
+        suppressed.push({ ...where, reason: symbol19.ignore.reason });
+        continue;
+      }
+      headIgnores.push({ ...where, reason: symbol19.ignore.reason });
+    } else if (symbol19.ignore?.invalid) {
+      invalidSuppressions.push(where);
+    }
+    kept.push(symbol19);
+  }
+  return { kept, suppressed, headIgnores, invalidSuppressions };
+}
+function defaultHomonymPass({ symbols = [], index = [] } = {}) {
+  return findHomonyms(index, { symbols });
+}
+function buildDuplicationContext({
+  diffText = "",
+  repo = ".",
+  threshold = DEFAULT_THRESHOLD,
+  maxCandidates = MAX_CANDIDATES,
+  maxPairs = MAX_PAIRS,
+  cacheDir = null,
+  allow = null,
+  homonymPass = defaultHomonymPass,
+  budgetMs = BUDGET_MS
+} = {}) {
+  const deadline = Date.now() + budgetMs;
+  const index = buildSymbolIndex({ repo, exclude: isExcludedPath, cacheDir, deadline });
+  const touched = applyExclusions(touchedSymbols(diffText, index.symbols));
+  const { kept, suppressed, headIgnores, invalidSuppressions } = partitionIgnored(
+    touched,
+    changedLinesByFile(diffText)
+  );
+  const introduced = kept.filter(isComparable);
+  const eligible = applyExclusions(index.symbols);
+  const comparable = filterWithin(eligible, isComparable, deadline);
+  const raw = findDuplicates({
+    symbols: introduced,
+    index: comparable,
+    threshold,
+    // One past the widest cap, so a symbol that had more candidates than it may
+    // keep is known to have had them, and the cut below is declared.
+    maxCandidates: Math.max(maxCandidates, MAX_CANDIDATES_PRIVATE) + 1,
+    deadline,
+    allow
+  });
+  const timedOut = index.timedOut || Date.now() >= deadline;
+  const homonyms = typeof homonymPass === "function" ? homonymPass({ symbols: kept, index: eligible, threshold }) ?? [] : [];
+  const introducedKeys = new Set(introduced.map(symbolKey));
+  const seen = /* @__PURE__ */ new Set();
+  const findings = [];
+  let droppedCandidates = 0;
+  let droppedPairs = 0;
+  let pairs = 0;
+  for (const finding of raw) {
+    const cap = isPublicSurface(finding.symbol) ? maxCandidates : Math.min(MAX_CANDIDATES_PRIVATE, maxCandidates);
+    const matches = [];
+    for (const match of finding.matches) {
+      const key = pairKey(finding.symbol, match.candidate);
+      if (seen.has(key)) continue;
+      if (matches.length >= cap) {
+        droppedCandidates += 1;
+        continue;
+      }
+      if (pairs >= maxPairs) {
+        droppedPairs += 1;
+        continue;
+      }
+      seen.add(key);
+      pairs += 1;
+      matches.push({
+        ...match,
+        introducedHere: introducedKeys.has(symbolKey(match.candidate))
+      });
+    }
+    if (matches.length) findings.push({ symbol: finding.symbol, matches });
+  }
+  return {
+    indexed: index.symbols.length,
+    indexTruncated: index.truncated,
+    // The comparison stopped on its budget rather than on running out of pairs.
+    comparisonTruncated: timedOut,
+    introduced: introduced.length,
+    findings,
+    // Declared, never silent: what the caps left out. `candidates` is a lower
+    // bound — the scorer stops looking one past the widest cap.
+    truncation: { candidates: droppedCandidates, pairs: droppedPairs },
+    pairsTruncated: droppedPairs > 0,
+    suppressed,
+    headIgnores,
+    invalidSuppressions,
+    homonyms
+  };
+}
+
+// src/context/rules.mjs
+import { lstatSync as lstatSync2, readdirSync, readFileSync as readFileSync4, realpathSync as realpathSync2 } from "node:fs";
+import { join as join4, posix as posix2, relative as relative2, sep as sep2 } from "node:path";
+var DEFAULT_RULES_DIR = join4(".claude", "rules");
+var DEFAULT_MAX_RULES_CHARS = 48e3;
+var RULE_FILE_PATTERN = /\.(md|mdc|txt)$/i;
+var UNREADABLE_REASON = "no es un archivo regular dentro del repositorio";
+var RULE_SOURCES = [
+  { kind: "dir", path: join4(".claude", "rules"), origin: "reglas del proyecto" },
+  // The tool-neutral folder some repositories keep instead of, or beside, the
+  // one above. Often a mirror of it: a file reached twice is read once (see
+  // `discover`).
+  { kind: "dir", path: join4(".agents", "rules"), origin: "reglas del proyecto" },
+  { kind: "dir", path: join4(".cursor", "rules"), origin: "reglas del editor" },
+  { kind: "file", path: ".cursorrules", origin: "reglas del editor" },
+  { kind: "file", path: ".github/copilot-instructions.md", origin: "instrucciones del asistente" },
+  // The CLAUDE.md / AGENTS.md closest to the touched files when they live in a
+  // nested folder: a sub-project's own instructions say more about its code
+  // than the ones at the root, so they come before them.
+  { kind: "nearest", names: ["CLAUDE.md", "AGENTS.md"], origin: "instrucciones del asistente" },
+  { kind: "file", path: "CLAUDE.md", origin: "instrucciones del asistente" },
+  { kind: "file", path: "AGENTS.md", origin: "instrucciones del asistente" },
+  { kind: "file", path: "CONTRIBUTING.md", origin: "gu\xEDa de contribuci\xF3n" }
+];
+function walk(dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const full = join4(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walk(full));
+    else if (RULE_FILE_PATTERN.test(entry.name)) out.push(full);
+  }
+  return out;
+}
+function exists(path) {
+  try {
+    return lstatSync2(path, { throwIfNoEntry: false }) != null;
+  } catch {
+    return false;
+  }
+}
+function identity(path, readable) {
+  if (!readable) return path;
+  try {
+    return realpathSync2(path);
+  } catch {
+    return path;
+  }
+}
+function ancestorChains(touched) {
+  const chains = [];
+  for (const raw of touched || []) {
+    const path = String(raw || "").replace(/\\/g, "/");
+    if (!path || path.startsWith("/") || /^[a-z]:/i.test(path)) continue;
+    if (path.split("/").includes("..")) continue;
+    const chain = [];
+    for (let dir = posix2.dirname(path); dir !== "." && dir !== "/"; dir = posix2.dirname(dir)) {
+      chain.push(dir);
+    }
+    if (chain.length) chains.push(chain);
+  }
+  return chains;
+}
+function nearestInstructionFiles(repo, names, touched) {
+  const probed = /* @__PURE__ */ new Map();
+  const present = (relPath) => {
+    if (!probed.has(relPath)) probed.set(relPath, exists(join4(repo, relPath)));
+    return probed.get(relPath);
+  };
+  const out = [];
+  for (const chain of ancestorChains(touched)) {
+    for (const name17 of names) {
+      const dir = chain.find((candidate) => present(`${candidate}/${name17}`));
+      if (dir && !out.includes(`${dir}/${name17}`)) out.push(`${dir}/${name17}`);
+    }
+  }
+  return out;
+}
+function pinnedInstructionFiles(repo, touched) {
+  const probed = /* @__PURE__ */ new Map();
+  const present = (relPath) => {
+    if (!probed.has(relPath)) probed.set(relPath, exists(join4(repo, relPath)));
+    return probed.get(relPath);
+  };
+  const at = (dir, name17) => dir === "." ? name17 : `${dir}/${name17}`;
+  const chains = touched ? ancestorChains(touched).map((chain) => [...chain, "."]) : [];
+  if (!touched || chains.length < touched.length) chains.push(["."]);
+  const out = /* @__PURE__ */ new Set();
+  for (const chain of chains) {
+    for (const name17 of ["AGENTS.md", "CLAUDE.md"]) {
+      const dir = chain.find((candidate) => present(at(candidate, name17)));
+      if (dir) {
+        out.add(at(dir, name17));
+        break;
+      }
+    }
+  }
+  return [...out];
+}
+function isCatchAll(glob) {
+  const tail = String(glob).replace(/^(\*\*\/)+/, "");
+  return !tail.includes("/") && /^\{?\*/.test(tail);
+}
+function ruleRank({ relPath, scope, touched, pinned }) {
+  if (pinned.has(relPath)) return { tier: 0, matched: 0 };
+  if (!touched || !scope.length) return { tier: 3, matched: 0 };
+  const matched = touched.filter((path) => matchesAny(scope, [path])).length;
+  return { tier: scope.every(isCatchAll) ? 2 : 1, matched };
+}
+function discover(repo, rulesDir, touched) {
+  const found = [];
+  const blocked = [];
+  const seen = /* @__PURE__ */ new Set();
+  const labels = /* @__PURE__ */ new Set();
+  const sources = rulesDir ? [{ kind: "dir", path: rulesDir, origin: "reglas del proyecto", absolute: true }] : RULE_SOURCES;
+  const root = rulesDir || repo;
+  const uniqueLabel = (preferred, fallback) => {
+    const label2 = labels.has(preferred) ? fallback : preferred;
+    labels.add(label2);
+    return label2;
+  };
+  const addFile = (file2, label2, origin) => {
+    const readable = isRegularFileWithin(file2, root);
+    if (!readable && !exists(file2)) return;
+    const key = identity(file2, readable);
+    if (seen.has(key)) return;
+    seen.add(key);
+    (readable ? found : blocked).push({ file: file2, label: uniqueLabel(label2, label2), origin });
+  };
+  for (const source of sources) {
+    if (source.kind === "nearest") {
+      for (const relPath of nearestInstructionFiles(repo, source.names, touched)) {
+        addFile(join4(repo, relPath), relPath, source.origin);
+      }
+      continue;
+    }
+    const base = source.absolute ? source.path : join4(repo, source.path);
+    if (source.kind === "dir") {
+      for (const file2 of walk(base)) {
+        const readable = isRegularFileWithin(file2, root);
+        const key = identity(file2, readable);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const entry = {
+          file: file2,
+          // Labelled relative to its own source folder, so the model sees
+          // `naming.md` rather than a path that means nothing to it.
+          label: uniqueLabel(
+            relative2(base, file2).split(sep2).join("/"),
+            relative2(root, file2).split(sep2).join("/")
+          ),
+          origin: source.origin
+        };
+        (readable ? found : blocked).push(entry);
+      }
+      continue;
+    }
+    addFile(base, source.path, source.origin);
+  }
+  return { found, blocked };
+}
+function rulesDirLabel(repo, rulesDir) {
+  if (!rulesDir) return posix2.join(".claude", "rules");
+  const rel = relative2(repo, rulesDir);
+  if (!rel) return ".";
+  if (rel.startsWith("..") || /^[A-Za-z]:|^[\\/]/.test(rel)) return posix2.join(".claude", "rules");
+  return rel.split(sep2).join("/");
+}
+function loadRules({
+  repo = ".",
+  rulesDir,
+  maxChars = DEFAULT_MAX_RULES_CHARS,
+  touched = null
+} = {}) {
+  const { found: discovered, blocked } = discover(repo, rulesDir, touched);
+  const unreadable = blocked.map((entry) => entry.label);
+  const sources = [];
+  const omittedSources = blocked.map((entry) => ({
+    path: entry.label,
+    chars: 0,
+    reason: UNREADABLE_REASON
+  }));
+  const parts = [];
+  let used = 0;
+  let truncated = false;
+  let totalChars = 0;
+  const pinned = rulesDir ? /* @__PURE__ */ new Set() : new Set(pinnedInstructionFiles(repo, touched));
+  const candidates = [];
+  const omitted = [];
+  discovered.forEach((found, index) => {
+    let body;
+    try {
+      body = readFileSync4(found.file, "utf8").trim();
+    } catch {
+      return;
+    }
+    const scope = declaredScope(body);
+    const section = `### ${found.label}
+${stripFrontmatter(body)}`;
+    totalChars += section.length;
+    if (touched && scope.length && !matchesAny(scope, touched)) {
+      omitted.push({
+        index,
+        entry: { path: found.label, chars: section.length, reason: `fuera de alcance (declara ${scope.join(", ")})` }
+      });
+      return;
+    }
+    const relPath = relative2(repo, found.file).split(sep2).join("/");
+    candidates.push({ index, found, section, rank: ruleRank({ relPath, scope, touched, pinned }) });
+  });
+  const queue = [...candidates].sort(
+    (a, b) => a.rank.tier - b.rank.tier || b.rank.matched - a.rank.matched || a.index - b.index
+  );
+  const kept = /* @__PURE__ */ new Set();
+  for (const candidate of queue) {
+    if (used + candidate.section.length > maxChars) {
+      truncated = true;
+      omitted.push({
+        index: candidate.index,
+        entry: { path: candidate.found.label, chars: candidate.section.length, reason: "presupuesto" }
+      });
+      continue;
+    }
+    kept.add(candidate.index);
+    used += candidate.section.length + 2;
+  }
+  for (const candidate of candidates) {
+    if (!kept.has(candidate.index)) continue;
+    parts.push(candidate.section);
+    sources.push({ path: candidate.found.label, chars: candidate.section.length, origin: candidate.found.origin });
+  }
+  omittedSources.push(...omitted.sort((a, b) => a.index - b.index).map((item) => item.entry));
+  return {
+    dir: rulesDir || join4(repo, DEFAULT_RULES_DIR),
+    // The folder as the repository names it, for messages: never an absolute
+    // checkout path, so two clones of the same commit print the same bytes.
+    dirLabel: rulesDirLabel(repo, rulesDir),
+    sources,
+    text: parts.join("\n\n"),
+    totalChars,
+    truncated,
+    // Echoed back so a note can state the number that did the dropping.
+    maxChars,
+    omittedSources,
+    // Rule files the repository declared and this gate refused to read.
+    unreadable,
+    // Every section there was got dropped for budget. Distinct from `empty`
+    // because the fix is different — raise the budget, versus write some rules —
+    // and because a check that skips green claiming "sin reglas declaradas"
+    // while `CLAUDE.md` sits untouched in the tree is stating something false.
+    // The budget is settable from the branch under review, so `maxRulesChars: 1`
+    // used to buy a green skip on a blocking check with no warning attached.
+    budgetExhausted: parts.length === 0 && omittedSources.some((s) => s.reason === "presupuesto"),
+    // `empty` answers exactly one question: did this repository write nothing
+    // down? A corpus emptied by the read guard, by scope, or by the budget is
+    // the opposite answer — the rules are there, in the tree, and were not
+    // applied — so none of those may reach the runner as "sin reglas
+    // declaradas". Callers that need "is there anything to send to the model"
+    // read `text`.
+    empty: parts.length === 0 && unreadable.length === 0 && omittedSources.length === 0
+  };
+}
+function rulesTruncationNote(rules) {
+  if (!rules.truncated) return null;
+  const omitted = rules.omittedSources.filter((s) => s.reason === "presupuesto").map((s) => s.path).join(", ");
+  return `Corpus de reglas truncado: ${rules.sources.length} de ${rules.sources.length + rules.omittedSources.length} archivos cargados (${rules.totalChars} caracteres en total). Omitidos por presupuesto: ${omitted}.`;
+}
+function rulesSourceNotes(rules) {
+  const notes = [];
+  if (rules.sources.length) {
+    notes.push(
+      `Reglas cargadas (${rules.sources.length}): ${rules.sources.map((s) => s.path).join(", ")}.`
+    );
+  }
+  const unreadable = rules.omittedSources.filter((s) => s.reason === UNREADABLE_REASON);
+  if (unreadable.length) {
+    notes.push(
+      `Reglas no le\xEDdas (${unreadable.length}): ${unreadable.map((s) => s.path).join(", ")}. Solo se leen archivos regulares dentro del repositorio: un enlace simb\xF3lico podr\xEDa apuntar a credenciales del runner o a una ruta fuera del checkout.`
+    );
+  }
+  const scoped = rules.omittedSources.filter(
+    (s) => s.reason !== "presupuesto" && s.reason !== UNREADABLE_REASON
+  );
+  if (scoped.length) {
+    notes.push(
+      `Reglas omitidas por no aplicar a los archivos de este PR (${scoped.length}): ${scoped.map((s) => `${s.path} \u2014 ${s.reason}`).join("; ")}.`
+    );
+  }
+  return notes;
+}
+var FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
+var SCOPE_KEY = /^\s*(paths|globs|appliesTo|applies_to|files)\s*:(.*)$/i;
+var LIST_ITEM = /^\s*-\s*(.*)$/;
+function declaredScope(body) {
+  const front = String(body || "").match(FRONTMATTER);
+  if (!front) return [];
+  const lines = front[1].split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const key = lines[i].match(SCOPE_KEY);
+    if (!key) continue;
+    const inline = stripComment(key[2].trim());
+    const globs = inline ? splitInline(inline) : blockList(lines, i + 1);
+    if (globs.length) return globs;
+  }
+  return [];
+}
+function blockList(lines, from) {
+  const items = [];
+  for (let j = from; j < lines.length; j += 1) {
+    const item = lines[j].match(LIST_ITEM);
+    if (item) {
+      const glob = unquote(stripComment(item[1].trim()));
+      if (glob) items.push(glob);
+    } else if (lines[j].trim() && !lines[j].trim().startsWith("#")) {
+      break;
+    }
+  }
+  return items;
+}
+function stripComment(value) {
+  let quote = null;
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    if (quote) {
+      if (char === quote) quote = null;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === "#" && (i === 0 || /\s/.test(value[i - 1]))) {
+      return value.slice(0, i).trim();
+    }
+  }
+  return value;
+}
+function unquote(value) {
+  const match = value.trim().match(/^(['"])([\s\S]*)\1$/);
+  return (match ? match[2] : value).trim();
+}
+function splitInline(value) {
+  if (value.startsWith("[") && value.endsWith("]")) {
+    return splitTopLevel(value.slice(1, -1), true).map(unquote).filter(Boolean);
+  }
+  return splitTopLevel(unquote(value), false).map((glob) => glob.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
+}
+function splitTopLevel(value, respectQuotes) {
+  const parts = [];
+  let current = "";
+  let braces = 0;
+  let quote = null;
+  for (const char of value) {
+    if (quote) {
+      if (char === quote) quote = null;
+    } else if (respectQuotes && (char === '"' || char === "'")) {
+      quote = char;
+    } else if (char === "{") {
+      braces += 1;
+    } else if (char === "}" && braces > 0) {
+      braces -= 1;
+    } else if (char === "," && braces === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  parts.push(current);
+  return parts.map((part) => part.trim());
+}
+function stripFrontmatter(body) {
+  return String(body || "").replace(FRONTMATTER, "").trim();
+}
+function matchesAny(globs, paths) {
+  const patterns = globs.map(globToRegExp2).filter(Boolean);
+  if (!patterns.length) return true;
+  return paths.some((path) => patterns.some((pattern) => pattern.test(path)));
+}
+function globToRegExp2(glob) {
+  let out = "";
+  let braces = 0;
+  for (let i = 0; i < glob.length; i += 1) {
+    const char = glob[i];
+    if (char === "*") {
+      if (glob[i + 1] === "*") {
+        if (glob[i + 2] === "/") {
+          out += "(?:.*/)?";
+          i += 2;
+        } else {
+          out += ".*";
+          i += 1;
+        }
+      } else {
+        out += "[^/]*";
+      }
+    } else if (char === "?") {
+      out += "[^/]";
+    } else if (char === "{") {
+      braces += 1;
+      out += "(?:";
+    } else if (char === "}" && braces > 0) {
+      braces -= 1;
+      out += ")";
+    } else if (char === "," && braces > 0) {
+      out += "|";
+    } else {
+      out += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  while (braces > 0) {
+    out += ")";
+    braces -= 1;
+  }
+  try {
+    return new RegExp(`^${out}$`, "i");
+  } catch {
+    return null;
+  }
+}
+
 // src/context/task-ref.mjs
 var BRANCH_ID = /(?:^|\/)(\d+)-/;
-var TEXT_ID = /#(\d+)|\[(\d+)\]|\((?:#)?(\d+)\)/g;
+var TEXT_ID = /#(\d+)|(?<![\w$])\[(\d+)\]|(?<![\w$])\((?:#)?(\d+)\)/g;
+var HASH_ID = /#(\d+)/g;
 var MAX_CONTEXT_TASKS = 3;
 function extractCriteriaBlock(prBody) {
   const match = String(prBody || "").match(/```criteria\s*\n([\s\S]*?)```/i);
   return match && match[1].trim() ? `${match[1].trim()}
 ` : "";
 }
-function idsFromText(text3) {
+function idsFromText(text3, { hashOnly = false } = {}) {
   const out = [];
-  for (const match of String(text3 || "").matchAll(TEXT_ID)) {
+  for (const match of String(text3 || "").matchAll(hashOnly ? HASH_ID : TEXT_ID)) {
     const id = match[1] ?? match[2] ?? match[3];
     if (id) out.push(id);
   }
@@ -36088,7 +38596,7 @@ function resolveTaskRef({ headRef = "", prTitle = "", prBody = "" } = {}) {
   const criteriaBlock = extractCriteriaBlock(prBody);
   const branchId = idFromBranch(headRef);
   const titleIds = idsFromText(prTitle);
-  const bodyIds = idsFromText(prBody);
+  const bodyIds = idsFromText(prBody, { hashOnly: true });
   let subjectId = null;
   let source = null;
   if (branchId) {
@@ -36114,6 +38622,103 @@ function resolveTaskRef({ headRef = "", prTitle = "", prBody = "" } = {}) {
     if (contextIds.length === MAX_CONTEXT_TASKS) break;
   }
   return { mode: "task", subjectId, source, contextIds, criteriaBlock };
+}
+
+// src/context/build.mjs
+async function noTaskSource(id) {
+  throw new Error(`no task source is configured to fetch #${id}`);
+}
+async function buildContext({
+  check: check2,
+  inputs,
+  config: config2,
+  log = () => {
+  },
+  fetchTask: fetchTask2 = noTaskSource,
+  fetchBase = true
+}) {
+  const needs = new Set(check2.meta.contextNeeds);
+  const ctx = {
+    base: inputs.base,
+    head: inputs.head,
+    repo: inputs.repo,
+    taskId: null,
+    config: config2,
+    // What the developer says they did. Every check gets it, because judging a
+    // change without reading its author's account of it is judging half the
+    // conversation. It is untrusted input and each check renders it as such.
+    prTitle: inputs.prTitle,
+    prBody: inputs.prBody,
+    headRef: inputs.headRef
+  };
+  if (needs.has("diff")) {
+    if (fetchBase) ensureBaseRef(inputs.repo, inputs.base);
+    ctx.diff = buildDiff({
+      repo: inputs.repo,
+      base: inputs.base,
+      head: inputs.head,
+      maxChars: config2.maxDiffChars
+    });
+    ctx.files = classifyDiffFiles(ctx.diff);
+  }
+  if (needs.has("rules")) {
+    ctx.rules = loadRules({
+      repo: inputs.repo,
+      maxChars: config2.maxRulesChars,
+      // Rules that declare which files they govern are matched against what
+      // this pull request actually touches, so an out-of-scope convention never
+      // takes budget from one that applies.
+      touched: ctx.files?.files ?? null
+    });
+  }
+  const symbolDiff = ctx.diff?.fullDiff ?? ctx.diff?.diff ?? "";
+  if (needs.has("coverage")) {
+    ctx.coverage = crossWithTests({
+      symbols: symbolsFromDiff(symbolDiff),
+      repo: inputs.repo
+    });
+  }
+  if (needs.has("duplication")) {
+    ctx.duplication = buildDuplicationContext({
+      diffText: symbolDiff,
+      repo: inputs.repo,
+      threshold: config2.threshold,
+      maxCandidates: config2.maxCandidates
+    });
+  }
+  if (needs.has("task")) {
+    const ref = resolveTaskRef({
+      headRef: inputs.headRef,
+      prTitle: inputs.prTitle,
+      prBody: inputs.prBody
+    });
+    ctx.taskRef = ref;
+    ctx.taskId = ref.subjectId;
+    if (ref.mode === "task" && ref.subjectId) {
+      try {
+        ctx.task = await fetchTask2(ref.subjectId);
+        if (ref.criteriaBlock) {
+          ctx.criteriaBlockIgnored = true;
+          log(`ignoring the PR body criteria fence: task #${ref.subjectId} was fetched`);
+        }
+      } catch (err) {
+        log(`task fetch failed for #${ref.subjectId}: ${err.message}`);
+        ctx.task = ref.criteriaBlock ? { criteriaBlock: ref.criteriaBlock } : null;
+        ctx.taskFetchError = err.message;
+      }
+      ctx.contextTasks = [];
+      for (const id of ref.contextIds) {
+        try {
+          ctx.contextTasks.push(await fetchTask2(id));
+        } catch (err) {
+          log(`context task fetch failed for #${id}: ${err.message}`);
+        }
+      }
+    } else if (ref.criteriaBlock) {
+      ctx.task = { criteriaBlock: ref.criteriaBlock };
+    }
+  }
+  return ctx;
 }
 
 // src/context/tasks-api.mjs
@@ -36751,7 +39356,7 @@ function noRulesVerdict(rulesCtx) {
     details: [],
     overall: "PASS",
     counts: { total: 0, relevant: 0, violations: 0 },
-    emptyMessage: unreadable.length ? `El repositorio declara ${unreadable.length} archivo(s) de reglas que no se leyeron (${listed}${rest > 0 ? ` y ${rest} m\xE1s` : ""}): solo se leen archivos regulares dentro del repositorio, nunca enlaces simb\xF3licos ni rutas fuera del checkout. No qued\xF3 ninguna regla que evaluar, as\xED que este check no juzg\xF3 nada. No bloquea.` : `Sin reglas declaradas en el repositorio (${rulesCtx?.dir ?? ".claude/rules"}). No hay convenciones que exigir.`
+    emptyMessage: unreadable.length ? `El repositorio declara ${unreadable.length} archivo(s) de reglas que no se leyeron (${listed}${rest > 0 ? ` y ${rest} m\xE1s` : ""}): solo se leen archivos regulares dentro del repositorio, nunca enlaces simb\xF3licos ni rutas fuera del checkout. No qued\xF3 ninguna regla que evaluar, as\xED que este check no juzg\xF3 nada. No bloquea.` : `Sin reglas declaradas en el repositorio (${rulesCtx?.dirLabel ?? rulesCtx?.dir ?? ".claude/rules"}). No hay convenciones que exigir.`
   };
 }
 
@@ -36868,7 +39473,7 @@ var meta5 = {
 var JSON_SHAPE5 = '{"overall":"PASS"|"FAIL","summary":"...","findings":[{"symbol":"...","location":"path:line","existing":"...","existingLocation":"path:line","verdict":"duplicate"|"similar"|"unrelated","recommendation":"..."}]}';
 var INSTRUCTION4 = 'One entry per pair given below, keeping both names and both locations. Set overall "FAIL" if any pair is "duplicate", else "PASS".';
 var MAX_BODY_CHARS3 = 1200;
-var MAX_PAIRS = 8;
+var MAX_PAIRS2 = 8;
 function bodyOf(symbol19) {
   const body = String(symbol19.body || symbol19.signature || "").trim();
   return body.length > MAX_BODY_CHARS3 ? `${body.slice(0, MAX_BODY_CHARS3)}
@@ -36882,7 +39487,7 @@ function pairsSection(findings) {
   let index = 0;
   for (const finding of findings) {
     for (const match of finding.matches) {
-      if (index >= MAX_PAIRS) break;
+      if (index >= MAX_PAIRS2) break;
       index += 1;
       const origin = match.introducedHere ? "Both symbols are introduced by THIS pull request." : "The second symbol already existed in the repository.";
       blocks.push(
@@ -37077,6 +39682,246 @@ function assertShape(name17, mod) {
   }
 }
 
+// src/report/verdict.mjs
+var STATUS = {
+  PASS: "pass",
+  FAIL: "fail",
+  TOOL_ERROR: "tool-error",
+  SKIPPED: "skipped"
+};
+var MAX_SUMMARY_CHARS = 700;
+function makeVerdict({
+  check: check2,
+  title,
+  status,
+  blocking,
+  summary = "",
+  rows = [],
+  details = [],
+  notes = [],
+  emptyMessage = "",
+  meta: meta9 = {}
+}) {
+  if (!check2) throw new Error("verdict requires a check name");
+  if (!Object.values(STATUS).includes(status)) {
+    throw new Error(`verdict has invalid status "${status}"`);
+  }
+  return {
+    schema: 1,
+    check: check2,
+    title: title || check2,
+    status,
+    blocking: Boolean(blocking),
+    // Bounded here as well as escaped at the renderer. The prompt asks the model
+    // for under 500 characters, but an instruction in a prompt is not a limit:
+    // this was the one model-supplied field no code bounded, which made it the
+    // place to put anything that had nowhere else to go.
+    summary: String(summary || "").slice(0, MAX_SUMMARY_CHARS),
+    rows,
+    details,
+    notes,
+    emptyMessage,
+    meta: meta9
+  };
+}
+function skippedVerdict({ check: check2, title, reason, blocking = false, meta: meta9 = {} }) {
+  return makeVerdict({
+    check: check2,
+    title,
+    status: STATUS.SKIPPED,
+    blocking,
+    notes: [reason],
+    emptyMessage: reason,
+    meta: meta9
+  });
+}
+function toolErrorVerdict({ check: check2, title, error: error51, meta: meta9 = {}, notes = [] }) {
+  return makeVerdict({
+    check: check2,
+    title,
+    status: STATUS.TOOL_ERROR,
+    blocking: false,
+    // The error first, then whatever context notes were already gathered
+    // (truncation, loaded rule sources) — those stay useful even on failure.
+    notes: [String(error51).slice(0, 1500), ...notes],
+    emptyMessage: "El check no pudo ejecutarse. No bloquea el merge.",
+    meta: meta9
+  });
+}
+function unreviewableVerdict({ check: check2, title, error: error51, blocking = true, meta: meta9 = {}, notes = [] }) {
+  return makeVerdict({
+    check: check2,
+    title,
+    status: STATUS.FAIL,
+    blocking,
+    summary: "El check no pudo revisar este cambio.",
+    notes: [String(error51).slice(0, 1500), ...notes],
+    emptyMessage: "El check no pudo revisar el contenido de este PR. Corrige lo que impide leerlo y vuelve a ejecutar.",
+    meta: meta9
+  });
+}
+function isBlockingFailure(verdict) {
+  return verdict.status === STATUS.FAIL && verdict.blocking === true;
+}
+
+// src/checks/short-circuit.mjs
+function isContentFailure(err) {
+  if (!err) return false;
+  if (err.contentFailure === true) return true;
+  if (err instanceof SyntaxError) return true;
+  return false;
+}
+function shortCircuit({ name: name17, check: check2, inputs, ctx }) {
+  if (check2.meta.requiresCode && ctx.files && !ctx.files.hasCode && !ctx.diff?.empty) {
+    return skippedVerdict({
+      check: name17,
+      title: check2.meta.title,
+      reason: `El diff no toca archivos de c\xF3digo (${ctx.files.nonCode.length} archivo(s) de documentaci\xF3n o binarios). No hay nada que revisar en este check.`
+    });
+  }
+  if (ctx.coverage) {
+    if (!ctx.coverage.hasTestSuite) {
+      return skippedVerdict({
+        check: name17,
+        title: check2.meta.title,
+        reason: "El repositorio no tiene archivos de test que cruzar. No hay cobertura que exigir hasta que exista una suite."
+      });
+    }
+    if (!ctx.coverage.orphans.length) {
+      const exempt = ctx.coverage.exempt?.length ?? 0;
+      const covered = ctx.coverage.covered?.length ?? 0;
+      const reason = exempt ? `Ning\xFAn s\xEDmbolo p\xFAblico con l\xF3gica del PR queda sin test: ${covered} aparecen en la suite (${ctx.coverage.testFileCount} archivos de test) y ${exempt} no tienen l\xF3gica que exija uno (DTOs, getters, mapeos simples o delegaci\xF3n).` : `Los s\xEDmbolos p\xFAblicos que introduce el PR ya aparecen en la suite (${ctx.coverage.testFileCount} archivos de test).`;
+      return skippedVerdict({ check: name17, title: check2.meta.title, reason });
+    }
+  }
+  if (ctx.duplication && !ctx.duplication.findings.length) {
+    const dup = ctx.duplication;
+    const suppressed = dup.suppressed?.length ?? 0;
+    let reason;
+    if (dup.introduced) {
+      reason = `Ninguno de los ${dup.introduced} s\xEDmbolos que introduce el PR se parece a los ${dup.indexed} ya indexados.`;
+    } else if (suppressed) {
+      reason = `El PR no deja s\xEDmbolos que comparar: ${suppressed} s\xEDmbolo(s) tocado(s) quedaron excluidos por un \`pr-validator-ignore duplication\` que ya estaba en la rama base.`;
+    } else {
+      reason = "El PR no introduce s\xEDmbolos comparables con el resto del repositorio.";
+    }
+    return skippedVerdict({
+      check: name17,
+      title: check2.meta.title,
+      reason: [reason, ...duplicationNotes(dup)].join(" ")
+    });
+  }
+  if (name17 === "rules" && ctx.rules && !ctx.rules.text) {
+    const base = noRulesVerdict(ctx.rules);
+    if (base.overall === "FAIL") {
+      return unreviewableVerdict({
+        check: name17,
+        title: check2.meta.title,
+        error: base.emptyMessage,
+        blocking: ctx.config?.blocking !== false
+      });
+    }
+    return skippedVerdict({
+      check: name17,
+      title: check2.meta.title,
+      reason: base.emptyMessage
+    });
+  }
+  if (check2.meta.contextNeeds.includes("task")) {
+    const mode = ctx.taskRef?.mode;
+    if (mode === "none") {
+      return skippedVerdict({
+        check: name17,
+        title: check2.meta.title,
+        reason: `El PR no referencia ninguna tarea, ni en la rama \`${inputs.headRef}\`, ni en el t\xEDtulo, ni en el cuerpo. No hay criterios que validar. Para que este check eval\xFAe, incluye el id de la tarea en el nombre de la rama (\`<id>-slug\`) o en el t\xEDtulo del PR (\`#<id>\`).`
+      });
+    }
+    if (!ctx.task) {
+      return skippedVerdict({
+        check: name17,
+        title: check2.meta.title,
+        reason: `No se pudo obtener la tarea #${ctx.taskId} del gestor de tareas` + (ctx.taskFetchError ? ` (${ctx.taskFetchError})` : "") + ", y el PR no incluye un bloque `criteria` de respaldo. Revisa la configuraci\xF3n de integraci\xF3n del repositorio. No bloquea."
+      });
+    }
+  }
+  return null;
+}
+function contextNotes(ctx, repoConfig, check2 = "") {
+  const notes = [...repoConfig?.notes ?? []];
+  notes.push(...gateOverrideNotes(repoConfig?.config ?? {}, check2));
+  if (ctx.criteriaBlockIgnored) {
+    notes.push(
+      "El cuerpo del PR incluye un bloque `criteria`, pero se obtuvo la tarea del gestor: se evaluaron los criterios de la tarea, no los del cuerpo. El bloque solo se usa cuando la tarea no se puede obtener."
+    );
+  }
+  if (ctx.diff) {
+    const note = truncationNote(ctx.diff);
+    if (note) notes.push(note);
+  }
+  if (ctx.rules) {
+    const note = rulesTruncationNote(ctx.rules);
+    if (note) notes.push(note);
+    notes.push(...rulesSourceNotes(ctx.rules));
+  }
+  if (ctx.duplication) notes.push(...duplicationNotes(ctx.duplication));
+  return notes;
+}
+var MAX_LISTED = 10;
+function listSymbols(entries, withReason) {
+  const shown = entries.slice(0, MAX_LISTED).map((entry) => {
+    const where = `\`${entry.path}:${entry.line}\` ${entry.name}`;
+    const reason = String(entry.reason ?? "").replace(/\s+/g, " ").trim();
+    return withReason && reason ? `${where} (motivo: "${reason}")` : where;
+  });
+  const rest = entries.length - shown.length;
+  return shown.join("; ") + (rest > 0 ? `; y ${rest} m\xE1s` : "");
+}
+function duplicationNotes(dup) {
+  const notes = [];
+  if (!dup) return notes;
+  if (dup.indexTruncated) {
+    notes.push(
+      `El \xEDndice de s\xEDmbolos del repositorio se trunc\xF3: se compar\xF3 contra ${dup.indexed} s\xEDmbolos, no contra todos. La revisi\xF3n de duplicaci\xF3n es parcial.`
+    );
+  }
+  if (dup.comparisonTruncated) {
+    notes.push(
+      "La comparaci\xF3n de duplicaci\xF3n agot\xF3 su presupuesto de tiempo y se detuvo antes de revisar todos los s\xEDmbolos que introduce el PR. La revisi\xF3n es parcial."
+    );
+  }
+  const candidates = dup.truncation?.candidates ?? 0;
+  const pairs = dup.truncation?.pairs ?? 0;
+  if (candidates > 0 || pairs > 0) {
+    const parts = [];
+    if (candidates > 0) {
+      parts.push(`${candidates} candidato(s) por encima del tope por s\xEDmbolo (3, o 5 si el s\xEDmbolo es p\xFAblico)`);
+    }
+    if (pairs > 0) parts.push(`${pairs} par(es) por encima del tope de pares por ejecuci\xF3n`);
+    notes.push(
+      `La comparaci\xF3n de duplicaci\xF3n recort\xF3 ${parts.join(" y ")}. Se descartaron los m\xE1s d\xE9biles: la revisi\xF3n cubre solo los pares m\xE1s fuertes.`
+    );
+  }
+  const suppressed = dup.suppressed ?? [];
+  if (suppressed.length) {
+    notes.push(
+      `${suppressed.length} s\xEDmbolo(s) tocado(s) no se compararon por un \`pr-validator-ignore duplication\` de la rama base: ${listSymbols(suppressed, true)}.`
+    );
+  }
+  const headIgnores = dup.headIgnores ?? [];
+  if (headIgnores.length) {
+    notes.push(
+      `${headIgnores.length} \`pr-validator-ignore duplication\` los agrega este PR y no se aplicaron: un PR no puede declarar aceptable su propia copia; valen desde que est\xE9n en la rama base. Se compararon igual: ${listSymbols(headIgnores, true)}.`
+    );
+  }
+  const invalid = dup.invalidSuppressions ?? [];
+  if (invalid.length) {
+    notes.push(
+      `${invalid.length} \`pr-validator-ignore duplication\` sin motivo no se aplicaron (el motivo es obligatorio): ${listSymbols(invalid, false)}.`
+    );
+  }
+  return notes;
+}
+
 // src/gateway.mjs
 var GatewayError2 = class extends Error {
   constructor(message, { attempts, lastError, rawText } = {}) {
@@ -37173,88 +40018,6 @@ function tokenUsage(usage) {
   return out;
 }
 
-// src/report/verdict.mjs
-var STATUS = {
-  PASS: "pass",
-  FAIL: "fail",
-  TOOL_ERROR: "tool-error",
-  SKIPPED: "skipped"
-};
-var MAX_SUMMARY_CHARS = 700;
-function makeVerdict({
-  check: check2,
-  title,
-  status,
-  blocking,
-  summary = "",
-  rows = [],
-  details = [],
-  notes = [],
-  emptyMessage = "",
-  meta: meta9 = {}
-}) {
-  if (!check2) throw new Error("verdict requires a check name");
-  if (!Object.values(STATUS).includes(status)) {
-    throw new Error(`verdict has invalid status "${status}"`);
-  }
-  return {
-    schema: 1,
-    check: check2,
-    title: title || check2,
-    status,
-    blocking: Boolean(blocking),
-    // Bounded here as well as escaped at the renderer. The prompt asks the model
-    // for under 500 characters, but an instruction in a prompt is not a limit:
-    // this was the one model-supplied field no code bounded, which made it the
-    // place to put anything that had nowhere else to go.
-    summary: String(summary || "").slice(0, MAX_SUMMARY_CHARS),
-    rows,
-    details,
-    notes,
-    emptyMessage,
-    meta: meta9
-  };
-}
-function skippedVerdict({ check: check2, title, reason, blocking = false, meta: meta9 = {} }) {
-  return makeVerdict({
-    check: check2,
-    title,
-    status: STATUS.SKIPPED,
-    blocking,
-    notes: [reason],
-    emptyMessage: reason,
-    meta: meta9
-  });
-}
-function toolErrorVerdict({ check: check2, title, error: error51, meta: meta9 = {}, notes = [] }) {
-  return makeVerdict({
-    check: check2,
-    title,
-    status: STATUS.TOOL_ERROR,
-    blocking: false,
-    // The error first, then whatever context notes were already gathered
-    // (truncation, loaded rule sources) — those stay useful even on failure.
-    notes: [String(error51).slice(0, 1500), ...notes],
-    emptyMessage: "El check no pudo ejecutarse. No bloquea el merge.",
-    meta: meta9
-  });
-}
-function unreviewableVerdict({ check: check2, title, error: error51, blocking = true, meta: meta9 = {}, notes = [] }) {
-  return makeVerdict({
-    check: check2,
-    title,
-    status: STATUS.FAIL,
-    blocking,
-    summary: "El check no pudo revisar este cambio.",
-    notes: [String(error51).slice(0, 1500), ...notes],
-    emptyMessage: "El check no pudo revisar el contenido de este PR. Corrige lo que impide leerlo y vuelve a ejecutar.",
-    meta: meta9
-  });
-}
-function isBlockingFailure(verdict) {
-  return verdict.status === STATUS.FAIL && verdict.blocking === true;
-}
-
 // src/run-check.mjs
 function readInputs(env = process.env) {
   return {
@@ -37270,155 +40033,6 @@ function readInputs(env = process.env) {
     model: env.INPUT_MODEL || env.PR_VALIDATOR_MODEL || "",
     configPath: env.INPUT_CONFIG_PATH || ".pr-validator.json"
   };
-}
-async function buildContext({ check: check2, inputs, config: config2, log }) {
-  const needs = new Set(check2.meta.contextNeeds);
-  const ctx = {
-    base: inputs.base,
-    head: inputs.head,
-    repo: inputs.repo,
-    taskId: null,
-    config: config2,
-    // What the developer says they did. Every check gets it, because judging a
-    // change without reading its author's account of it is judging half the
-    // conversation. It is untrusted input and each check renders it as such.
-    prTitle: inputs.prTitle,
-    prBody: inputs.prBody,
-    headRef: inputs.headRef
-  };
-  if (needs.has("diff")) {
-    ensureBaseRef(inputs.repo, inputs.base);
-    ctx.diff = buildDiff({
-      repo: inputs.repo,
-      base: inputs.base,
-      head: inputs.head,
-      maxChars: config2.maxDiffChars
-    });
-    ctx.files = classifyDiffFiles(ctx.diff);
-  }
-  if (needs.has("rules")) {
-    ctx.rules = loadRules({
-      repo: inputs.repo,
-      maxChars: config2.maxRulesChars,
-      // Rules that declare which files they govern are matched against what
-      // this pull request actually touches, so an out-of-scope convention never
-      // takes budget from one that applies.
-      touched: ctx.files?.files ?? null
-    });
-  }
-  if (needs.has("coverage")) {
-    ctx.coverage = crossWithTests({
-      symbols: symbolsFromDiff(ctx.diff?.diff ?? ""),
-      repo: inputs.repo
-    });
-  }
-  if (needs.has("duplication")) {
-    ctx.duplication = buildDuplicationContext({
-      diffText: ctx.diff?.diff ?? "",
-      repo: inputs.repo,
-      threshold: config2.threshold,
-      maxCandidates: config2.maxCandidates
-    });
-  }
-  if (needs.has("task")) {
-    const ref = resolveTaskRef({
-      headRef: inputs.headRef,
-      prTitle: inputs.prTitle,
-      prBody: inputs.prBody
-    });
-    ctx.taskRef = ref;
-    ctx.taskId = ref.subjectId;
-    if (ref.mode === "task" && ref.subjectId) {
-      try {
-        ctx.task = await fetchTask(ref.subjectId);
-        if (ref.criteriaBlock) {
-          ctx.criteriaBlockIgnored = true;
-          log(`ignoring the PR body criteria fence: task #${ref.subjectId} was fetched`);
-        }
-      } catch (err) {
-        log(`task fetch failed for #${ref.subjectId}: ${err.message}`);
-        ctx.task = ref.criteriaBlock ? { criteriaBlock: ref.criteriaBlock } : null;
-        ctx.taskFetchError = err.message;
-      }
-      ctx.contextTasks = [];
-      for (const id of ref.contextIds) {
-        try {
-          ctx.contextTasks.push(await fetchTask(id));
-        } catch (err) {
-          log(`context task fetch failed for #${id}: ${err.message}`);
-        }
-      }
-    } else if (ref.criteriaBlock) {
-      ctx.task = { criteriaBlock: ref.criteriaBlock };
-    }
-  }
-  return ctx;
-}
-function shortCircuit({ name: name17, check: check2, inputs, ctx }) {
-  if (check2.meta.requiresCode && ctx.files && !ctx.files.hasCode && !ctx.diff?.empty) {
-    return skippedVerdict({
-      check: name17,
-      title: check2.meta.title,
-      reason: `El diff no toca archivos de c\xF3digo (${ctx.files.nonCode.length} archivo(s) de documentaci\xF3n o binarios). No hay nada que revisar en este check.`
-    });
-  }
-  if (ctx.coverage) {
-    if (!ctx.coverage.hasTestSuite) {
-      return skippedVerdict({
-        check: name17,
-        title: check2.meta.title,
-        reason: "El repositorio no tiene archivos de test que cruzar. No hay cobertura que exigir hasta que exista una suite."
-      });
-    }
-    if (!ctx.coverage.orphans.length) {
-      return skippedVerdict({
-        check: name17,
-        title: check2.meta.title,
-        reason: `Los s\xEDmbolos p\xFAblicos que introduce el PR ya aparecen en la suite (${ctx.coverage.testFileCount} archivos de test).`
-      });
-    }
-  }
-  if (ctx.duplication && !ctx.duplication.findings.length) {
-    return skippedVerdict({
-      check: name17,
-      title: check2.meta.title,
-      reason: ctx.duplication.introduced ? `Ninguno de los ${ctx.duplication.introduced} s\xEDmbolos que introduce el PR se parece a los ${ctx.duplication.indexed} ya indexados.` : "El PR no introduce s\xEDmbolos p\xFAblicos comparables con el resto del repositorio."
-    });
-  }
-  if (name17 === "rules" && ctx.rules && !ctx.rules.text) {
-    const base = noRulesVerdict(ctx.rules);
-    if (base.overall === "FAIL") {
-      return unreviewableVerdict({
-        check: name17,
-        title: check2.meta.title,
-        error: base.emptyMessage,
-        blocking: ctx.config?.blocking !== false
-      });
-    }
-    return skippedVerdict({
-      check: name17,
-      title: check2.meta.title,
-      reason: base.emptyMessage
-    });
-  }
-  if (check2.meta.contextNeeds.includes("task")) {
-    const mode = ctx.taskRef?.mode;
-    if (mode === "none") {
-      return skippedVerdict({
-        check: name17,
-        title: check2.meta.title,
-        reason: `El PR no referencia ninguna tarea, ni en la rama \`${inputs.headRef}\`, ni en el t\xEDtulo, ni en el cuerpo. No hay criterios que validar. Para que este check eval\xFAe, incluye el id de la tarea en el nombre de la rama (\`<id>-slug\`) o en el t\xEDtulo del PR (\`#<id>\`).`
-      });
-    }
-    if (!ctx.task) {
-      return skippedVerdict({
-        check: name17,
-        title: check2.meta.title,
-        reason: `No se pudo obtener la tarea #${ctx.taskId} del gestor de tareas` + (ctx.taskFetchError ? ` (${ctx.taskFetchError})` : "") + ", y el PR no incluye un bloque `criteria` de respaldo. Revisa la configuraci\xF3n de integraci\xF3n del repositorio. No bloquea."
-      });
-    }
-  }
-  return null;
 }
 function cacheOptions({ model = "", check: check2 = "", repo = "" } = {}) {
   if (check2 !== "rules") return void 0;
@@ -37458,41 +40072,6 @@ function providerOptionsFor({ model, check: check2, repo, effort } = {}) {
   }
   return merged;
 }
-function isContentFailure(err) {
-  if (!err) return false;
-  if (err.contentFailure === true) return true;
-  if (err instanceof SyntaxError) return true;
-  return false;
-}
-function contextNotes(ctx, repoConfig, check2 = "") {
-  const notes = [...repoConfig?.notes ?? []];
-  notes.push(...gateOverrideNotes(repoConfig?.config ?? {}, check2));
-  if (ctx.criteriaBlockIgnored) {
-    notes.push(
-      "El cuerpo del PR incluye un bloque `criteria`, pero se obtuvo la tarea del gestor: se evaluaron los criterios de la tarea, no los del cuerpo. El bloque solo se usa cuando la tarea no se puede obtener."
-    );
-  }
-  if (ctx.diff) {
-    const note = truncationNote(ctx.diff);
-    if (note) notes.push(note);
-  }
-  if (ctx.rules) {
-    const note = rulesTruncationNote(ctx.rules);
-    if (note) notes.push(note);
-    notes.push(...rulesSourceNotes(ctx.rules));
-  }
-  if (ctx.duplication?.indexTruncated) {
-    notes.push(
-      `El \xEDndice de s\xEDmbolos del repositorio se trunc\xF3: se compar\xF3 contra ${ctx.duplication.indexed} s\xEDmbolos, no contra todos. La revisi\xF3n de duplicaci\xF3n es parcial.`
-    );
-  }
-  if (ctx.duplication?.comparisonTruncated) {
-    notes.push(
-      "La comparaci\xF3n de duplicaci\xF3n agot\xF3 su presupuesto de tiempo y se detuvo antes de revisar todos los s\xEDmbolos que introduce el PR. La revisi\xF3n es parcial."
-    );
-  }
-  return notes;
-}
 async function runCheck({ inputs, env = process.env, log = console.error } = {}) {
   const name17 = inputs.check;
   let check2;
@@ -37528,7 +40107,7 @@ async function runCheck({ inputs, env = process.env, log = console.error } = {})
   }
   let ctx;
   try {
-    ctx = await buildContext({ check: check2, inputs, config: config2, log });
+    ctx = await buildContext({ check: check2, inputs, config: config2, log, fetchTask });
   } catch (err) {
     if (isContentFailure(err)) {
       log(`::error::${name17}: no se pudo construir el contexto: ${err.message}`);
@@ -37627,13 +40206,13 @@ async function runCheck({ inputs, env = process.env, log = console.error } = {})
 function setOutput(key, value, env = process.env) {
   const file2 = env.GITHUB_OUTPUT;
   if (!file2) return;
-  writeFileSync(file2, `${key}=${value}
+  writeFileSync2(file2, `${key}=${value}
 `, { flag: "a" });
 }
 async function main(env = process.env) {
   const inputs = readInputs(env);
   const verdict = await runCheck({ inputs, env });
-  writeFileSync(inputs.outFile, JSON.stringify(verdict, null, 2), "utf8");
+  writeFileSync2(inputs.outFile, JSON.stringify(verdict, null, 2), "utf8");
   setOutput("status", verdict.status, env);
   setOutput("blocking-failure", String(isBlockingFailure(verdict)), env);
   if (verdict.status === STATUS.TOOL_ERROR) {

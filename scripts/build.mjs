@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Bundle each entry into the action folder that GitHub executes.
+// Bundle each entry into the action folder that GitHub executes, plus the
+// local-mode bundle (`dist/local/pr-local.mjs`) that runs on developer machines.
 //
 // The bundles are committed: GitHub runs an action's code straight from the
 // repository, with no install step. `--verify` rebuilds into memory and
@@ -8,18 +9,30 @@
 // runs.
 
 import { build } from 'esbuild';
+import { realpathSync } from 'node:fs';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveRawImport } from './raw-import.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const VERIFY = process.argv.includes('--verify');
 
-const TARGETS = [
-  { entry: 'src/entries/run-check.mjs', out: 'actions/run-check/dist/index.mjs' },
-  { entry: 'src/entries/report.mjs', out: 'actions/report/dist/index.mjs' },
-  { entry: 'src/entries/resolve-checks.mjs', out: 'actions/resolve-checks/dist/index.mjs' },
+/**
+ * `forbid` marks a bundle that must never contain the model client or the task
+ * manager client. The local bundle runs on developer machines with no gateway
+ * key and no task-manager credentials; if either module were reachable from its
+ * entry, the bundle would carry the SDK and the code that reads those secrets
+ * for nothing. The build fails instead of trusting nobody to add that import.
+ */
+export const TARGETS = [
+  { name: 'run-check', entry: 'src/entries/run-check.mjs', out: 'actions/run-check/dist/index.mjs' },
+  { name: 'report', entry: 'src/entries/report.mjs', out: 'actions/report/dist/index.mjs' },
+  {
+    name: 'resolve-checks',
+    entry: 'src/entries/resolve-checks.mjs',
+    out: 'actions/resolve-checks/dist/index.mjs',
+  },
+  { name: 'local', entry: 'src/entries/local.mjs', out: 'dist/local/pr-local.mjs', forbid: true },
 ];
 
 /**
@@ -49,14 +62,49 @@ const rawTextPlugin = {
   },
 };
 
-async function bundle(entry) {
+/** Package specifiers and source modules a `forbid` bundle may not reach. */
+const FORBIDDEN_PACKAGE = /^(ai(\/.*)?|@ai-sdk\/.+)$/;
+const FORBIDDEN_MODULE = /(^|[\\/])(gateway|tasks-api)\.mjs$/;
+
+/**
+ * Fail resolution of the model SDK, the gateway client and the task-manager
+ * client. Matching on the import specifier catches a static import, a dynamic
+ * `import()` and a re-export alike, and the error names the importer.
+ */
+export const forbidPlugin = {
+  name: 'forbid',
+  setup(pluginBuild) {
+    pluginBuild.onResolve({ filter: /.*/ }, (args) => {
+      if (args.kind === 'entry-point') return undefined;
+      const spec = args.path.replace(/\?.*$/, '');
+      if (FORBIDDEN_PACKAGE.test(spec) || FORBIDDEN_MODULE.test(spec)) {
+        return {
+          errors: [
+            {
+              text: `"${args.path}" may not be bundled into this target (imported by ${args.importer})`,
+            },
+          ],
+        };
+      }
+      return undefined;
+    });
+  },
+};
+
+/**
+ * Bundle one entry and return the code.
+ *
+ * @param {string} entry  Repository-relative entry path.
+ * @param {{forbid?: boolean}} [opts]
+ */
+export async function bundle(entry, { forbid = false } = {}) {
   const result = await build({
     entryPoints: [join(ROOT, entry)],
     bundle: true,
     platform: 'node',
     format: 'esm',
     target: 'node20',
-    plugins: [rawTextPlugin],
+    plugins: forbid ? [forbidPlugin, rawTextPlugin] : [rawTextPlugin],
     write: false,
     legalComments: 'none',
     banner: {
@@ -89,42 +137,83 @@ function firstDifference(a, b) {
   };
 }
 
-let failed = false;
+/**
+ * Build, or with `--verify` compare, every target. `--only <name>` limits the
+ * run to one target.
+ *
+ * @returns {Promise<number>} the exit code.
+ */
+async function run(argv) {
+  const verify = argv.includes('--verify');
+  const onlyIndex = argv.indexOf('--only');
+  const only = onlyIndex === -1 ? null : argv[onlyIndex + 1];
+  const targets = only ? TARGETS.filter((target) => target.name === only) : TARGETS;
+  if (only && !targets.length) {
+    console.error(`unknown target "${only}". Targets: ${TARGETS.map((t) => t.name).join(', ')}`);
+    return 1;
+  }
 
-for (const target of TARGETS) {
-  const code = await bundle(target.entry);
-  const outPath = join(ROOT, target.out);
+  let failed = false;
 
-  if (VERIFY) {
-    let committed = '';
-    try {
-      committed = await readFile(outPath, 'utf8');
-    } catch {
-      console.error(`MISSING  ${target.out} — run \`npm run build\``);
-      failed = true;
+  for (const target of targets) {
+    const code = await bundle(target.entry, { forbid: target.forbid });
+    const outPath = join(ROOT, target.out);
+
+    if (verify) {
+      let committed = '';
+      try {
+        committed = await readFile(outPath, 'utf8');
+      } catch {
+        console.error(`MISSING  ${target.out} — run \`npm run build\``);
+        failed = true;
+        continue;
+      }
+
+      if (committed !== code) {
+        console.error(`STALE    ${target.out} — does not match src/, run \`npm run build\``);
+        const diff = firstDifference(committed, code);
+        if (diff) {
+          console.error(`         first difference at offset ${diff.offset} (line ~${diff.line})`);
+          console.error(`         committed: ${diff.committed}`);
+          console.error(`         rebuilt:   ${diff.rebuilt}`);
+        } else {
+          console.error('         same content, different length — check trailing bytes');
+        }
+        failed = true;
+      } else {
+        console.log(`OK       ${target.out}`);
+      }
       continue;
     }
 
-    if (committed !== code) {
-      console.error(`STALE    ${target.out} — does not match src/, run \`npm run build\``);
-      const diff = firstDifference(committed, code);
-      if (diff) {
-        console.error(`         first difference at offset ${diff.offset} (line ~${diff.line})`);
-        console.error(`         committed: ${diff.committed}`);
-        console.error(`         rebuilt:   ${diff.rebuilt}`);
-      } else {
-        console.error('         same content, different length — check trailing bytes');
-      }
-      failed = true;
-    } else {
-      console.log(`OK       ${target.out}`);
-    }
-    continue;
+    await mkdir(dirname(outPath), { recursive: true });
+    await writeFile(outPath, code, 'utf8');
+    console.log(`built    ${target.out} (${(code.length / 1024).toFixed(1)} kB)`);
   }
 
-  await mkdir(dirname(outPath), { recursive: true });
-  await writeFile(outPath, code, 'utf8');
-  console.log(`built    ${target.out} (${(code.length / 1024).toFixed(1)} kB)`);
+  return failed ? 1 : 0;
 }
 
-process.exit(failed ? 1 : 0);
+/**
+ * Is this file the script node was asked to run? Compared through realpath,
+ * and case-insensitively on Windows, where the drive letter's case depends on
+ * how the shell spelled the path. A false negative here would turn the build
+ * into a silent no-op that exits 0.
+ */
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    const self = realpathSync(fileURLToPath(import.meta.url));
+    const invoked = realpathSync(process.argv[1]);
+    return process.platform === 'win32'
+      ? self.toLowerCase() === invoked.toLowerCase()
+      : self === invoked;
+  } catch {
+    return false;
+  }
+}
+
+// Importable by the tests without building anything.
+if (invokedDirectly()) {
+  process.exit(await run(process.argv.slice(2)));
+}

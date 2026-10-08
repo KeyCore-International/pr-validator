@@ -1,0 +1,25 @@
+namespace Shop.Application.Services
+{
+    public class QuoteService
+    {
+        public decimal Estimate(Quote quote)
+        {
+            return SumWithDiscount(quote.Lines, quote.CustomerTier);
+        }
+
+        private decimal SumWithDiscount(IEnumerable<OrderLine> items, int level)
+        {
+            decimal result = 0;
+            foreach (var item in items)
+            {
+                var amount = item.Quantity * item.UnitPrice;
+                if (level > 2 && amount > 100)
+                {
+                    amount = amount * 0.9m;
+                }
+                result += Math.Round(amount, 2);
+            }
+            return result;
+        }
+    }
+}

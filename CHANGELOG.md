@@ -4,6 +4,138 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/).
 Versionado [SemVer](https://semver.org/lang/es/): los tags `vX.Y.Z` son inmutables
 y el tag `vX` se mueve al último release de ese major.
 
+## [4.5.0] — 2026-10-07
+
+Menor: ningún input, output ni forma de veredicto de la CI cambia. Lo que cambia
+es la precisión de `rules`, `duplication` y `tests`, que ven más y mejor.
+
+### Añadido
+
+- **Modo local: `dist/local/pr-local.mjs`.** El motor como CLI para la máquina del
+  desarrollador, con los subcomandos `facts`, `prompts`, `render`, `config`,
+  `inventory` y `rules`. Un solo archivo ESM sin dependencias; el target lleva un
+  plugin de esbuild que hace fallar el build si la resolución alcanza `ai`,
+  `@ai-sdk/*`, el gateway o el cliente del gestor de tareas. `prompts` produce los
+  mismos prompts que la CI y `render` el mismo veredicto. `facts.json` es
+  determinista: dos corridas sobre el mismo commit dan los mismos bytes.
+  Referencia: [docs/LOCAL.md](docs/LOCAL.md).
+- **Homónimos.** Dos funciones con el mismo nombre en archivos distintos que hacen
+  cosas distintas (dos `formatDate` que formatean distinto) se detectan en el
+  contexto de duplicación. El modo local los reporta; el comentario de la CI aún no
+  los muestra.
+- **Léxico español ↔ inglés en los nombres.** `formatearFecha` y `formatDate` ya
+  comparten nombre para el comparador, con stop-words y plurales de ambos idiomas.
+- **Vocabulario de APIs e IDF.** El cuerpo se lee también como el vocabulario de
+  llamadas y miembros que usa, y los fragmentos que aparecen en más del 5 % de las
+  funciones del repositorio pesan menos. Pesos: nombre .25, firma .15, cuerpo .45,
+  vocabulario .15.
+- **Supresión en línea:** `// pr-validator-ignore duplication: <motivo>`. Sin motivo
+  no vale y se reporta. Solo vale si la rama base ya la tenía: una que agrega el
+  propio PR no se aplica, el símbolo se compara igual y queda listada en las notas
+  (`headIgnores`), por la misma razón que `allow`. Cada símbolo suprimido se
+  declara en las notas con su `ruta:línea` y su motivo, y el skip ya no dice que
+  no había nada comparable cuando lo que hubo fue una supresión.
+- **`coverage.suite` y `coverage.logicTouched` en `facts.json`.** Las funciones con
+  lógica, de cualquier alcance, que el diff agrega o cambia, calculadas aunque el
+  repositorio no tenga pruebas, cada una con el `suite` de su lenguaje. Solo modo
+  local: el contexto de la CI no cambia.
+- **`.pr-validator.json`:** la clave `local` (la CI la acepta y no la lee) y, solo en
+  `duplication`, `allow` y `reference`. La CI lee este archivo del head del PR, así
+  que no aplica `allow`: un PR no puede declarar aceptable su propia copia. El modo
+  local lo aplica leyéndolo de la rama base.
+
+### Cambiado
+
+- **El recorte del diff sirve primero la producción** y nombra cada archivo que
+  deja fuera. Antes cortaba por el orden de git: en una rama de 42 archivos, la
+  documentación y las pruebas que git imprimía antes se llevaron un servicio de
+  producción, y el prompt solo decía cuántos faltaban. Ahora va por archivos
+  enteros, producción, estilos y locales, pruebas, y lo demás con lo que sobre;
+  el contexto lleva `omittedPaths` y `partialPath`.
+- **El stat del diff lleva rutas completas** (`--stat=10000`). Las abreviadas
+  (`.../Services/X.cs`) dejaban fuera de alcance reglas con `paths:` que aplicaban.
+- **`rules` gasta el presupuesto por relevancia:** primero el `AGENTS.md` más
+  cercano a lo tocado, luego las reglas cuyos `paths:` nombran archivos del cambio
+  (globs concretos antes que `**/*.ext`), y al final las que no declaran alcance.
+  Antes el `AGENTS.md` de la raíz era lo primero que se caía.
+- **Modo local: el repositorio y la rama salen de git.** `facts.repo`, «Repositorio»
+  y el `Repo:` de los prompts usan el nombre de `origin` o del clon principal, no la
+  carpeta del worktree; con HEAD desacoplado la rama es la única ref que apunta a
+  HEAD (`branchSource` dice de dónde salió). Dos worktrees del mismo commit dan los
+  mismos bytes.
+- **Disparadores: `added` acepta `{ pattern, in }`**, un patrón acotado a sus
+  propios globs, para que un disparador pese lo que cambió y no el nombre de la
+  carpeta.
+- **`rules` lee `paths:`**, en lista entre comillas separada por comas, en lista YAML
+  en línea o en bloque, además de `globs`/`appliesTo`/`files`. Antes una regla con
+  `paths:` se aplicaba a todo PR. Una coma dentro de `{ts,tsx}` ya no parte el glob.
+- **`rules` lee `.agents/rules`** después de `.claude/rules`, sin repetir un archivo
+  que sea el mismo por junction o enlace, y el `CLAUDE.md`/`AGENTS.md` más cercano a
+  cada archivo tocado en subcarpetas.
+- **`duplication` indexa todos los alcances:** funciones privadas, métodos de clase,
+  funciones internas de un composable y de `<script setup>`, métodos privados de C#
+  y funciones locales. Un símbolo cuenta como introducido si el diff toca su span:
+  también una función existente cuyo cuerpo se reescribió.
+- **Topes declarados:** 3 candidatos por símbolo privado, 5 por exportado y 15 pares
+  por corrida; lo recortado queda en `truncation` y en las notas del veredicto.
+  Cuerpo mínimo: 8 tokens para lo exportado y 16 para lo privado, contados sin la
+  cabecera de la declaración (la cabecera de un arrow ya suma 9). Lo público se
+  define igual en el comparador y en el contexto: un método público de una clase
+  usa el piso de lo exportado.
+- **`duplication` deja fuera la delegación de una sentencia** (una llamada o una
+  asignación sin lógica: `router.push(...)`, `emit('retry')`, `api.get(url)`), las
+  carpetas de herramientas (`.claude/`, `.agents/`, `.github/`, `.cursor/`) y el par
+  formado por una función y otra declarada dentro de ella. Dos funciones internas
+  con el mismo nombre en un mismo archivo ya se comparan entre sí.
+- **Homónimos solo entre exportados.** Dos helpers privados de módulo no se cruzan
+  en ninguna llamada, tampoco en `composables/` o `utils/`.
+- **El presupuesto de 20 s cubre toda la pasada:** leer el índice, la tabla de
+  frecuencias (muestreada a 20.000 cuerpos) y cada candidato. Agotado, se declara.
+- **El piso «solo cuerpo»** (esqueleto ≥0,8) exige ahora que el vocabulario coincida
+  (≥0,3, o ambos vacíos): dos funciones que solo comparten la forma del control de
+  flujo dejan de ser duplicados.
+- **`tests` solo exige prueba a lo que tiene lógica:** ramas, bucles, aritmética,
+  fechas, regex, `Math`/`Intl`, parseo o moneda. DTOs, getters, mapeos planos,
+  delegación pura, registro de DI y migraciones quedan exentos, con el motivo. El
+  cruce exige que la prueba importe el módulo (ruta relativa, alias `@/`/`~/` o
+  barrel) y lo mencione; en C#, que la prueba sea de la clase. El motivo del salto
+  ya no afirma que la suite menciona lo que en realidad quedó exento.
+- **Exclusiones de duplicación:** stories, mocks, fixtures, `locales/` y el
+  `ModelSnapshot` de EF.
+
+### Corregido
+
+- **El skip de `rules` sin reglas nombra la carpeta relativa al repositorio.** «Sin
+  reglas declaradas en el repositorio (…)» imprimía la ruta absoluta del checkout, así
+  que dos clones del mismo commit no daban los mismos bytes. Ahora dice `.claude/rules`
+  (o la carpeta configurada, relativa al repositorio).
+- **Una arrow sin punto y coma** ya no se extiende hasta la declaración siguiente.
+- **El código dentro de strings, comentarios y regex** ya no se extrae como símbolo
+  (SQL en raw strings de C#, genéricos como `Map<List<A>, List<B>>(`).
+- **CRLF:** los bloques `<script>` de Vue y varios patrones de C# fallaban en
+  checkouts de Windows.
+- **Presupuesto del diff.** Los lockfiles, snapshots y generados (`*.Designer.cs`,
+  `*ModelSnapshot.cs`…) se apartan antes del recorte a `maxDiffChars`, así que ya no
+  empujan fuera del prompt los archivos escritos a mano; el diff los nombra en una
+  línea final. La tabla de categorías es una sola, compartida con el modo local.
+- **Duplicación y cobertura sobre el diff completo.** Se calculaban sobre el diff ya
+  recortado: un PR grande recibía «ninguno de los 3 símbolos se parece» mientras el
+  diff completo tenía 22 símbolos y 8 candidatos.
+- **Cobertura de C# por interfaz.** Una prueba que llega al servicio por su
+  interfaz (`GetRequiredService<IOrderService>().PlaceAsync(…)`) ya cubre el método:
+  `IOrderService` y las interfaces de la lista base cuentan como mención de la clase.
+- **Ids de tarea.** El cuerpo del PR solo aporta ids con la forma `#3002`: un
+  `nvarchar(1000)` o un conteo en prosa («sin código (3)») ya no se leen como tareas
+  de contexto. El título sigue aceptando `(3002)` y `[3002]`, salvo pegados a una
+  palabra (`decimal(18)`, `items[2]`).
+- **Modo local, `FIX`:** lo dispara una rama `fix/…` o `hotfix/…` (opción nueva
+  `--branch` para un checkout desacoplado) o `--fix`, ya no el asunto `fix(…):` de un
+  commit. Los disparadores aceptan `branches`, y un archivo que casa con varios globs
+  de un mismo disparador cuenta una vez. La razón del escalón nombra `FIX` en vez de
+  «no triggers».
+- **Modo local, prompts parciales:** `<check>.ctx.json` e `index.json` llevan
+  `partial`, `partialReasons` y los conteos del diff cuando el prompt no muestra todo.
+
 ## [4.4.0] — 2026-07-30
 
 ### Añadido

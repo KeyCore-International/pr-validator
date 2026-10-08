@@ -1,0 +1,9 @@
+export const toCents = (amount: number) =>
+  Math.round(amount * 100)
+
+export const formatAmount = (cents: number, currency = 'USD') =>
+  new Intl.NumberFormat('en-US', { style: 'currency', currency })
+    .format(cents / 100)
+    .replace(/\u00a0/g, ' ')
+
+export const isNegative = (cents: number) => cents < 0

@@ -1,0 +1,57 @@
+import type { CardViewModel, ListingSummary } from '~/types/catalog'
+import { listingTitle } from '~/utils/listingTitle'
+
+export function useCatalogHelpers() {
+  const { apiUrl } = useRuntimeConfig().public
+
+  function resolveImage(path: string | null): string {
+    if (!path) return '/images/placeholder.jpg'
+    return path.startsWith('http') ? path : `${apiUrl}${path}`
+  }
+
+  function formatCurrency(value: number | null): string {
+    if (value == null) return '-'
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(value)
+  }
+
+  function getChannelLabel(channel: number): string {
+    switch (channel) {
+      case 1: return 'Rent'
+      case 2: return 'Sale'
+      case 3: return 'Rent or sale'
+      default: return ''
+    }
+  }
+
+  function formatArea(value: number): string {
+    return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value)} sq ft`
+  }
+
+  function mapToCard(listing: ListingSummary): CardViewModel {
+    const tags: string[] = []
+    if (listing.area) tags.push(formatArea(listing.area))
+    if (listing.featured) tags.push('featured')
+
+    return {
+      id: listing.id,
+      image: resolveImage(listing.imagePath),
+      title: listingTitle(listing),
+      price: formatCurrency(listing.price),
+      location: [listing.district, listing.city].filter(Boolean).join(', '),
+      href: `/listing/${listing.slug}`,
+      tags,
+    }
+  }
+
+  return {
+    resolveImage,
+    formatCurrency,
+    getChannelLabel,
+    mapToCard,
+  }
+}
