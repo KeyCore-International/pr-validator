@@ -4738,7 +4738,7 @@ function identity(path, readable) {
 function ancestorChains(touched) {
   const chains = [];
   for (const raw of touched || []) {
-    const path = String(raw || "").split(sep2).join("/");
+    const path = String(raw || "").replace(/\\/g, "/");
     if (!path || path.startsWith("/") || /^[a-z]:/i.test(path)) continue;
     if (path.split("/").includes("..")) continue;
     const chain = [];
