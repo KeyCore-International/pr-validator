@@ -29,10 +29,19 @@ describe('csharp symbols', () => {
     expect(names(found)).toEqual([
       'VacancyService',
       'EvaluateAsync',
+      'Hidden',
       'ScoreDto',
       'IScorer',
       'Helper',
     ]);
+  });
+
+  // Private methods are indexed for duplication, and stay out of what the tests
+  // check reads through `exported`.
+  it('finds private methods without marking them exported', () => {
+    const hidden = found.find((s) => s.name === 'Hidden');
+    expect(hidden.exported).toBe(false);
+    expect(hidden.scope).toBe('private');
   });
 
   // Properties and expression-bodied members are data, not units a test targets.
@@ -70,7 +79,7 @@ describe('typescript symbols', () => {
   );
 
   it('finds exported behaviour', () => {
-    expect(names(found)).toEqual([
+    expect(names(found.filter((s) => s.exported))).toEqual([
       'buildScore',
       'fetchAll',
       'ScoreService',
@@ -87,8 +96,12 @@ describe('typescript symbols', () => {
     expect(names(found)).not.toContain('MAX');
   });
 
-  it('leaves module-private helpers out', () => {
-    expect(names(found)).not.toContain('privateHelper');
+  // Collected for duplication, never marked exported: the tests check reads
+  // only what other modules can import.
+  it('keeps module-private helpers out of the exported set', () => {
+    const helper = found.find((s) => s.name === 'privateHelper');
+    expect(helper.exported).toBe(false);
+    expect(helper.scope).not.toBe('exported');
   });
 });
 

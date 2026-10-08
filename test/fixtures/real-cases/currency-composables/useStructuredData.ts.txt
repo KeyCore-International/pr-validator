@@ -1,0 +1,63 @@
+import type { Ref } from 'vue'
+import type { ListingDetail, ShelfItem } from '~/types/catalog'
+
+function escapeJson(json: string): string {
+  return json.replace(/</g, '\\u003c').replace(/>/g, '\\u003e')
+}
+
+export function useStructuredDataHome(items: Ref<ShelfItem[]>) {
+  const { apiUrl } = useRuntimeConfig().public
+
+  function resolveImage(path: string | null): string {
+    if (!path) return '/images/placeholder.jpg'
+    return path.startsWith('http') ? path : `${apiUrl}${path}`
+  }
+
+  const schema = computed(() =>
+    items.value.map((item) => ({
+      '@type': 'ItemList',
+      name: item.title,
+      image: resolveImage(item.imagePath),
+    })),
+  )
+
+  return { schema }
+}
+
+export function useStructuredDataListing(listing: Ref<ListingDetail | null>) {
+  const { apiUrl } = useRuntimeConfig().public
+
+  function resolveImage(path: string | null): string {
+    if (!path) return '/images/placeholder.jpg'
+    return path.startsWith('http') ? path : `${apiUrl}${path}`
+  }
+
+  function formatCurrency(value: number): string {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(value)
+  }
+
+  const schema = computed(() => {
+    const l = listing.value
+    if (!l) return null
+
+    const offers = l.prices.map((price) => ({
+      '@type': 'Offer',
+      description: price.monthly ? `${formatCurrency(price.amount)}/month` : formatCurrency(price.amount),
+    }))
+
+    return {
+      '@type': 'Product',
+      name: l.title,
+      image: l.images.map((img) => resolveImage(img.filePath)),
+      offers,
+      json: escapeJson(JSON.stringify(offers)),
+    }
+  })
+
+  return { schema }
+}

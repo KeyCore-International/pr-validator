@@ -160,6 +160,6 @@ export function noRulesVerdict(rulesCtx) {
         `(${listed}${rest > 0 ? ` y ${rest} más` : ''}): solo se leen archivos regulares dentro ` +
         'del repositorio, nunca enlaces simbólicos ni rutas fuera del checkout. No quedó ninguna ' +
         'regla que evaluar, así que este check no juzgó nada. No bloquea.'
-      : `Sin reglas declaradas en el repositorio (${rulesCtx?.dir ?? '.claude/rules'}). No hay convenciones que exigir.`,
+      : `Sin reglas declaradas en el repositorio (${rulesCtx?.dirLabel ?? rulesCtx?.dir ?? '.claude/rules'}). No hay convenciones que exigir.`,
   };
 }

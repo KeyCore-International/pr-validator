@@ -131,6 +131,16 @@ const LOOP_B = `public decimal ComputeSum(Invoice invoice)
     return acumulado;
 }`;
 
+const LOOP_C = `public decimal Slugificar(Invoice factura)
+{
+    decimal acumulado = 0;
+    foreach (var linea in factura.Lines)
+    {
+        acumulado += linea.Price * linea.Quantity;
+    }
+    return acumulado;
+}`;
+
 const UNRELATED = `public string Slugify(string input)
 {
     if (input == null) { throw new ArgumentNullException(); }
@@ -210,9 +220,12 @@ describe('scorePair', () => {
     expect(out.score).toBeGreaterThan(DEFAULT_THRESHOLD);
   });
 
-  // The length bounds must not move a single number. These are the four this
-  // pair produced before they existed.
-  it('scores a realistic pair exactly as it did before the bounds', () => {
+  // The length bounds must not move a single number. These are the signals
+  // this pair produces under the four-signal weights: the bodies share their
+  // skeleton but none of their vocabulary (Lines/Price/Quantity against
+  // Items/Amount/Count), so the body-only floor does not apply and the score
+  // is the plain weighted sum.
+  it('scores a realistic pair exactly', () => {
     const out = scorePair(
       symbol(),
       symbol({
@@ -227,7 +240,8 @@ describe('scorePair', () => {
     expect(out.name).toBe(1);
     expect(out.body).toBe(1);
     expect(out.signature).toBeCloseTo(0.6, 10);
-    expect(out.score).toBe(1);
+    expect(out.vocabulary).toBe(0);
+    expect(out.score).toBeCloseTo(0.25 + 0.15 * 0.6 + 0.45, 10);
   });
 
   it('stays below the threshold for unrelated work', () => {
@@ -339,13 +353,14 @@ describe('the pre-filter never costs a real finding', () => {
       signature: 'public decimal CalculateOrderTotal(Order order)',
       body: LOOP_A,
     });
-    // Different name, different parameter type, same routine.
+    // Different name, different parameter type, renamed locals; the same
+    // routine over the same members.
     const existing = symbol({
       name: 'Slugificar',
       path: 'src/Old.cs',
       line: 5,
       signature: 'public decimal Slugificar(Invoice invoice)',
-      body: LOOP_B,
+      body: LOOP_C,
     });
 
     const [finding] = findDuplicates({ symbols: [introduced], index: [existing] });
@@ -392,7 +407,7 @@ describe('the pre-filter never costs a real finding', () => {
 // nothing. Same reasoning that already excludes migrations.
 describe('tests are out of the duplication comparison', () => {
   it.each([
-    'Inmoxphere.Tests.Integration/Tests/SessionCookieAuthTests.cs',
+    'Shop.Tests.Integration/Tests/SessionCookieAuthTests.cs',
     'tests/api/orders.test.ts',
     'src/components/Card.spec.ts',
     '__tests__/helpers.js',

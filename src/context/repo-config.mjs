@@ -22,6 +22,10 @@ const TOP_LEVEL_KEYS = new Set([
   'maxDiffChars',
   'maxRulesChars',
   'checksConfig',
+  // Settings for running the validator on a developer's machine. The pull
+  // request run never reads them, so their contents are not validated here:
+  // the local runner owns that block and reports on it itself.
+  'local',
 ]);
 
 /** Keys accepted inside `checks: { <name>: { … } }`. */
@@ -35,6 +39,23 @@ const PER_CHECK_KEYS = new Set([
   'threshold',
   'maxCandidates',
 ]);
+
+/**
+ * Keys only one check understands. Declared on any other check they would be
+ * silently ignored, so they are reported like any other unknown key.
+ */
+const CHECK_SPECIFIC_KEYS = {
+  // Pairs the team has already judged acceptable, and the folder of shared
+  // helpers new code is expected to reuse.
+  duplication: new Set(['allow', 'reference']),
+};
+
+/** Is `key` a setting the named check will act on? */
+function isKnownCheckKey(check, key) {
+  if (PER_CHECK_KEYS.has(key)) return true;
+  // Own properties only: a check named `constructor` must not reach the prototype.
+  return Object.hasOwn(CHECK_SPECIFIC_KEYS, check) && CHECK_SPECIFIC_KEYS[check].has(key);
+}
 
 /**
  * Read `.pr-validator.json`, if the repository has one.
@@ -96,7 +117,7 @@ function unknownKeyNotes(config, configPath) {
     for (const [name, settings] of Object.entries(checks)) {
       if (!settings || typeof settings !== 'object') continue;
       for (const key of Object.keys(settings)) {
-        if (!PER_CHECK_KEYS.has(key)) perCheck.push(`checks.${name}.${key}`);
+        if (!isKnownCheckKey(name, key)) perCheck.push(`checks.${name}.${key}`);
       }
     }
   }

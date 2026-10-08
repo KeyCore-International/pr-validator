@@ -37,8 +37,11 @@ const FORBIDDEN = [
  */
 const EXCLUDED = [':!scripts/neutrality.mjs'];
 
-/** The committed bundles — the file class where the leak already happened once. */
-const BUNDLE_GLOB = 'actions/*/dist/index.mjs';
+/**
+ * The committed bundles — the file class where the leak already happened once.
+ * The action bundles, and the local-mode CLI that other tools vendor.
+ */
+const BUNDLE_GLOBS = ['actions/*/dist/index.mjs', 'dist/local/*.mjs'];
 
 /**
  * How git grep is told to treat files it considers binary.
@@ -69,7 +72,7 @@ const BINARY_POLICY = ['--text'];
 function assertBundlesScanned() {
   let listed = '';
   try {
-    listed = execFileSync('git', ['ls-files', '--', BUNDLE_GLOB], {
+    listed = execFileSync('git', ['ls-files', '--', ...BUNDLE_GLOBS], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -80,10 +83,10 @@ function assertBundlesScanned() {
 
   const bundles = listed.split('\n').map((line) => line.trim()).filter(Boolean);
   if (!bundles.length) {
-    console.error(`::error::el escaneo de neutralidad no encontró ningún bundle en ${BUNDLE_GLOB}.`);
+    console.error(`::error::el escaneo de neutralidad no encontró ningún bundle en ${BUNDLE_GLOBS.join(', ')}.`);
     console.error(
       'Este gate garantiza que los bundles commiteados se escanean. Si cambiaron de ' +
-        'ruta, actualiza BUNDLE_GLOB en este script para que vuelva a comprobarlos.',
+        'ruta, actualiza BUNDLE_GLOBS en este script para que vuelva a comprobarlos.',
     );
     process.exit(2);
   }

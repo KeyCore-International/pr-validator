@@ -18,8 +18,21 @@
 /** `fix/3002-slug`, `3002-slug`, `feature/3002-slug` — any prefix, or none. */
 const BRANCH_ID = /(?:^|\/)(\d+)-/;
 
-/** `#3002`, `[3002]`, `(#3002)` — the forms a developer actually writes. */
-const TEXT_ID = /#(\d+)|\[(\d+)\]|\((?:#)?(\d+)\)/g;
+/**
+ * `#3002`, `[3002]`, `(#3002)` — the forms a developer actually writes.
+ *
+ * A bracket or parenthesis glued to a word is an argument or an index, not a
+ * reference: `nvarchar(1000)`, `decimal(18)`, `items[2]`. Those are left out;
+ * `(#3002)` still resolves anywhere through the `#` form.
+ */
+const TEXT_ID = /#(\d+)|(?<![\w$])\[(\d+)\]|(?<![\w$])\((?:#)?(\d+)\)/g;
+
+/**
+ * The body's form: `#3002` only. A body is prose, and prose puts bare numbers in
+ * brackets all the time — "sin código (3)", "fallan solo en la rama (5)" — which
+ * the title, one line naming the change, does not.
+ */
+const HASH_ID = /#(\d+)/g;
 
 /**
  * Extra tasks pulled in as context. Bounded because each one is a request and a
@@ -39,11 +52,14 @@ export function extractCriteriaBlock(prBody) {
 
 /**
  * Every task id in a free-text field, in the order they appear.
+ *
+ * @param {string} text
+ * @param {{hashOnly?: boolean}} [opts] `hashOnly` reads `#3002` alone (the body).
  * @returns {string[]}
  */
-export function idsFromText(text) {
+export function idsFromText(text, { hashOnly = false } = {}) {
   const out = [];
-  for (const match of String(text || '').matchAll(TEXT_ID)) {
+  for (const match of String(text || '').matchAll(hashOnly ? HASH_ID : TEXT_ID)) {
     const id = match[1] ?? match[2] ?? match[3];
     if (id) out.push(id);
   }
@@ -74,7 +90,7 @@ export function resolveTaskRef({ headRef = '', prTitle = '', prBody = '' } = {})
 
   const branchId = idFromBranch(headRef);
   const titleIds = idsFromText(prTitle);
-  const bodyIds = idsFromText(prBody);
+  const bodyIds = idsFromText(prBody, { hashOnly: true });
 
   // Precedence picks the source; inside the winning source the first id wins.
   // Positional on purpose: two runs over the same pull request have to choose

@@ -15,3 +15,4 @@
 # Generated bundles: keep them out of diffs and merge conflicts. They are
 # rebuilt from src/ and verified by CI, never merged by hand.
 actions/*/dist/index.mjs -diff linguist-generated=true
+dist/local/pr-local.mjs -diff linguist-generated=true

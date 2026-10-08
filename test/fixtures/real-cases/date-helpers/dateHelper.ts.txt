@@ -1,0 +1,110 @@
+/**
+ * DD-MM-YYYY
+ */
+export const formatDateToDDMMYYYY = (date: string | Date | null | undefined): string => {
+  if (!date) return '-';
+
+  try {
+    const parsed = date instanceof Date ? date : new Date(date);
+
+    if (isNaN(parsed.getTime())) {
+      return '-';
+    }
+
+    const day = parsed.getDate().toString().padStart(2, '0');
+    const month = (parsed.getMonth() + 1).toString().padStart(2, '0');
+    const year = parsed.getFullYear();
+
+    return `${day}-${month}-${year}`;
+  } catch (e) {
+    console.error("Error formatting date:", e);
+    return '-';
+  }
+};
+
+/**
+ * DD-MM-YYYY HH:MM
+ */
+export const formatDate = (date: string | Date | null | undefined): string => {
+  if (!date) return '-';
+
+  try {
+    const parsed = date instanceof Date ? date : new Date(date);
+
+    if (isNaN(parsed.getTime())) {
+      return '-';
+    }
+
+    const day = parsed.getDate().toString().padStart(2, '0');
+    const month = (parsed.getMonth() + 1).toString().padStart(2, '0');
+    const year = parsed.getFullYear();
+    const hours = parsed.getHours().toString().padStart(2, '0');
+    const minutes = parsed.getMinutes().toString().padStart(2, '0');
+
+    return `${day}-${month}-${year} ${hours}:${minutes}`;
+  } catch (e) {
+    console.error("Error formatting date:", e);
+    return '-';
+  }
+};
+
+/**
+ * DD/MM/YYYY
+ */
+export const formatDateWithSlash = (date: string | Date | null | undefined): string => {
+  if (!date) return '-';
+
+  try {
+    const parsed = date instanceof Date ? date : new Date(date);
+
+    if (isNaN(parsed.getTime())) {
+      return '-';
+    }
+
+    const day = parsed.getDate().toString().padStart(2, '0');
+    const month = (parsed.getMonth() + 1).toString().padStart(2, '0');
+    const year = parsed.getFullYear();
+
+    return `${day}/${month}/${year}`;
+  } catch (e) {
+    console.error("Error formatting date:", e);
+    return '-';
+  }
+};
+
+/**
+ * YYYY-MM-DD, for date inputs.
+ */
+export const formatDateForInput = (date: string | Date | null | undefined): string => {
+  if (!date) return '';
+
+  try {
+    const parsed = date instanceof Date ? date : new Date(date);
+
+    if (isNaN(parsed.getTime())) {
+      return '';
+    }
+
+    return parsed.toISOString().split('T')[0];
+  } catch (e) {
+    console.error("Error formatting date:", e);
+    return '';
+  }
+};
+
+/**
+ * Whether the end comes after the start.
+ */
+export const validateDateRange = (startDate: string | Date | null | undefined, endDate: string | Date | null | undefined): boolean => {
+  if (!startDate || !endDate) return true;
+
+  try {
+    const start = startDate instanceof Date ? startDate : new Date(startDate);
+    const end = endDate instanceof Date ? endDate : new Date(endDate);
+
+    return end > start;
+  } catch (e) {
+    console.error("Error validating date range:", e);
+    return false;
+  }
+};
